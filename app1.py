@@ -1266,7 +1266,8 @@ def main() -> None:
         render_archive_tab()
 
     with tab3:
-        render_diagnostic_tab()
+        st.write("Under Construction")
+        #render_diagnostic_tab()
 
 
 if __name__ == "__main__":

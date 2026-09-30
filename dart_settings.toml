@@ -22,7 +22,7 @@ height_m = 713
 [ui]
 timezone = "Asia/Kolkata"
 archive_recent_limit = 5
-refresh_interval_ms = 1000
+refresh_interval_ms = 5000
 page_title = "DART"
 page_icon = "☩"
 quick_observation_name = "1pps"
