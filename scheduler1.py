@@ -1,5 +1,6 @@
 import os
 import time
+import re
 from datetime import datetime
 from urllib.parse import quote
 
@@ -130,7 +131,37 @@ def trigger_observation(payload: dict) -> bool:
 def update_quick_observation(pulsar: str, data: dict, log_current: list[str]) -> None:
     status = data.get("status", "Not Started")
     duration = int(data.get("duration") or 0)
-    ra_start = normalize_observation_time(data.get("ra_start", ""))
+    #ra_start = normalize_observation_time(data.get("ra_start", ""))
+    raw_ra_start = data.get("ra_start", "")
+
+    if raw_ra_start:
+    # 1. Normalize first
+        normalized_ra_start = normalize_observation_time(raw_ra_start)
+
+        try:
+        # 2. Parse the normalized value
+            parsed_ra_start = datetime.strptime(
+                normalized_ra_start,
+                "%d_%m_%Y %H:%M:%S"
+            )
+
+        # 3. Change ONLY the date
+            parsed_ra_start = parsed_ra_start.replace(
+                year=datetime.now().year,
+                month=datetime.now().month,
+                day=datetime.now().day
+            )
+
+        # 4. Normalize again
+            ra_start = normalize_observation_time(parsed_ra_start)
+
+        except (ValueError, TypeError) as e:
+            print(f"Could not update RA start date: {e}")
+            ra_start = normalized_ra_start
+    else:
+        ra_start = ""
+
+
     started_at = normalize_observation_time(data.get("started_at", "")) if data.get("started_at") else None
 
     if status != "Not Started":
@@ -177,12 +208,11 @@ def update_standard_observation(pulsar: str, data: dict, log_current: list[str])
 
     try:
         next_ra_start, updated_countdown = RA(pulsar)
+        updated_countdown -= (duration * 60) / 2
+        normalized_ra_start = normalize_observation_time(next_ra_start)
+        db.update_observation(pulsar, count_down=updated_countdown, ra_start=normalized_ra_start, started_at=None)
     except Exception:
         return
-
-    updated_countdown -= (duration * 60) / 2
-    normalized_ra_start = normalize_observation_time(next_ra_start)
-    db.update_observation(pulsar, count_down=updated_countdown, ra_start=normalized_ra_start, started_at=None)
 
     if updated_countdown <= SCHEDULER_THRESHOLD_SECONDS:
         if is_retry_window_open(pulsar, duration) and can_retry_trigger(pulsar):
@@ -215,10 +245,10 @@ def main() -> None:
             continue
 
         try:
-            if pulsar == QUICK_OBSERVATION_NAME:
-                update_quick_observation(pulsar, data, log_current)
-            else:
+            if re.match(r"^J\d{4}\+\d{4}", pulsar):
                 update_standard_observation(pulsar, data, log_current)
+            else:
+                update_quick_observation(pulsar, data, log_current)
         except Exception as exc:
             print(f"Scheduler warning for {pulsar}: {exc}")
 
