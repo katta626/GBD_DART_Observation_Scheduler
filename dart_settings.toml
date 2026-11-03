@@ -1,4 +1,7 @@
-# Edit this file when IPs, ports, paths, or runtime settings change.
+# Shared defaults, tracked in git.
+# Do NOT put production-only values here (real API IP, site refresh rate, ...):
+# put them in dart_settings.local.toml (git-ignored), which overrides this file.
+# See dart_settings.local.toml.example.
 
 [paths]
 database = "data_store.db"
@@ -9,7 +12,7 @@ scheduler_script = "scheduler1.py"
 
 [network]
 scheme = "http"
-api_host = "172.17.20.210"
+api_host = "172.17.20.XXX"
 api_port = 6000
 request_timeout_seconds = 5
 flask_bind_host = "0.0.0.0"
@@ -22,11 +25,12 @@ height_m = 713
 [ui]
 timezone = "Asia/Kolkata"
 archive_recent_limit = 5
-refresh_interval_ms = 5000
+refresh_interval_ms = 1000
 page_title = "DART"
 page_icon = "☩"
 quick_observation_name = "1pps"
 quick_add_countdown_seconds = 10
+enable_diagnostics = true
 
 [scheduler]
 threshold_seconds = 10
@@ -36,3 +40,7 @@ standard_trigger_countdown = 300
 
 [observation]
 script = ""
+
+[hdf5_sync]
+remote_host = "vela@172.17.20.203"
+remote_dir = "/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43"

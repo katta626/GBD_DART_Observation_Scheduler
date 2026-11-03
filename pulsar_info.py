@@ -13,13 +13,25 @@ height = 713;  # meters
 
 observing_location = EarthLocation(lat=latitude*u.deg, lon=longitude*u.deg)
 
+# The scheduler calls RA() for every pulsar once per second; downloading the ATNF
+# catalogue each time is slow and hammers the ATNF server, so keep it for a day.
+CATALOGUE_MAX_AGE_SECONDS = 24 * 3600
+_catalogue = None
+_catalogue_loaded_at = 0.0
+
+
+def get_pulsar_catalogue():
+    global _catalogue, _catalogue_loaded_at
+    if _catalogue is None or time.time() - _catalogue_loaded_at > CATALOGUE_MAX_AGE_SECONDS:
+        from psrqpy import QueryATNF
+        _catalogue = QueryATNF(params=['F0']).get_pulsars()
+        _catalogue_loaded_at = time.time()
+    return _catalogue
+
 def get_all_time():
     IST = str(np.datetime64(datetime.datetime.now()))
     UTC = datetime.datetime.now(datetime.UTC)
-    Astro_fmt = Time(IST, format='isot', scale='utc')
-    Julian_day = Astro_fmt.jd
-    Modified_Julian_day = Astro_fmt.mjd
-    
+
     observing_time = Time(UTC, scale='utc', location=observing_location)
     LST = observing_time.sidereal_time('mean')
     #LST.to_string(unit=u.hour, sep=':')
@@ -27,10 +39,7 @@ def get_all_time():
     return LST, IST
 
 def RA(k):
-    from psrqpy import QueryATNF
-    query = QueryATNF(params=['F0'])
-
-    psrs = query.get_pulsars()
+    psrs = get_pulsar_catalogue()
     # Get Local Sidereal Time
     lst_now, ist_now = get_all_time()
 

@@ -1,3 +1,21 @@
 fits_plots/
+fits_files/
+env_variables.shift/
+versions/
 log_files/
-env_variables.shift
+
+# Per-machine settings (production API IP etc.); see dart_settings.local.toml.example
+dart_settings.local.toml
+
+# Runtime state: the live schedule database is created automatically and must
+# never be overwritten by a deploy. data_store_default.db stays tracked as a seed.
+data_store.db
+testing_pipeline/*.db
+
+# Live HDF5 data synced by transient_hdf5/real_time_PDR_monitoring.sh
+transient_hdf5/temp_data/
+
+# Python / OS noise
+__pycache__/
+*.pyc
+.DS_Store

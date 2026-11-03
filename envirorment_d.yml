@@ -12,3 +12,6 @@ dependencies: # The list of packages to include in your environment
         - matplotlib==3.10.3
         - matplotlib-inline==0.1.7
         - scipy==1.16.0
+        - pandas
+        - requests
+        - flask

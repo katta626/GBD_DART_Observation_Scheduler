@@ -3,7 +3,7 @@ set -euo pipefail
 
 source_dir="$1"
 local_dir="$2"
-remote_machine="vela@172.17.20.222"
+remote_machine="${DART_HDF5_REMOTE_HOST:-vela@172.17.20.203}"
 remote_source="$remote_machine:$source_dir"
 files_to_keep=120
 poll_seconds=10
