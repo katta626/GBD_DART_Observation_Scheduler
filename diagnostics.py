@@ -1,30 +1,40 @@
 """Diagnostic plots for the DIAGNOSTIC PLOTS tab, read directly from the PDR HDF5 files.
 
-Reproduces the four plots of the original scripts in live_PDR_plot.zip (pearson_CC,
-cc_tseries_phase, spectrogram, one_hr_plot) with corrected labels. Each plot function
-returns PNG bytes, so the app can cache a finished image and only redraw it when a new
-file arrives; that keeps the tab fast while the page refreshes every few seconds.
+Draws the four plots of the original scripts in live_PDR_plot.zip (pearson_CC,
+cc_tseries_phase, spectrogram, one_hr_plot) as interactive Plotly charts. The calculations
+deliberately follow those scripts line by line, including 10*log10(|x|^2) on values that
+are already powers and the real part of the complex Pearson ratio.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
-from io import BytesIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
+import pandas as pd
 
 # The acquisition leaves 96-byte HDF5 files (a header with no data) next to the real ones.
 MIN_VALID_FILE_BYTES = 1024
+# More columns than a screen has pixels only slows the browser; one hour is ~7000 spectra.
 MAX_SPECTROGRAM_COLUMNS = 720
-SECONDS_PER_DAY = 86400.0
-PLOT_DPI = 120
+# The original plotted the first 50 spectra of a file and kept the last one drawn.
+ORIGINAL_SPECTRUM_INDEX = 49
 
 SPECTRUM_DATASETS = ("timestamp", "corr_spec_avg", "acorr_spec_avg1", "acorr_spec_avg2")
 WINDOW_DATASETS = ("timestamp", "corr_spec_avg", "p_sum_avg")
 
 # Files that are empty, truncated, or still being written.
 UNREADABLE_FILE_ERRORS = (OSError, KeyError, ValueError)
+
+# Chart palette for the dark plot surface, checked with the dataviz palette validator.
+SURFACE = "#0c1c34"
+TEXT_PRIMARY = "#f0efec"
+TEXT_SECONDARY = "#c3c2b7"
+GRID = "rgba(195, 194, 183, 0.16)"
+SERIES_1 = "#3987e5"
+SERIES_2 = "#d95926"
+HEATMAP_SCALE = [[0.0, "#0d366b"], [0.25, "#1c5cab"], [0.5, "#3987e5"], [0.75, "#86b6ef"], [1.0, "#cde2fb"]]
 
 
 @dataclass(frozen=True)
@@ -33,11 +43,19 @@ class Band:
     bandwidth_mhz: float = 16.5
     channel0_is_high: bool = False
 
-    def channel_frequencies(self, channel_count: int) -> np.ndarray:
-        """Centre frequency (MHz) of every channel, in channel order."""
-        width = self.bandwidth_mhz / channel_count
-        ascending = self.center_mhz - self.bandwidth_mhz / 2 + (np.arange(channel_count) + 0.5) * width
-        return ascending[::-1] if self.channel0_is_high else ascending
+    def _ordered(self, frequencies: np.ndarray) -> np.ndarray:
+        return 2 * self.center_mhz - frequencies if self.channel0_is_high else frequencies
+
+    def full_axis(self, channel_count: int) -> np.ndarray:
+        """freq_axis of the single-file script: linspace(freq-bw/2, freq+bw/2, nchan)."""
+        low = self.center_mhz - self.bandwidth_mhz / 2
+        return self._ordered(np.linspace(low, low + self.bandwidth_mhz, channel_count))
+
+    def slice_axis(self, channel_count: int, start: int, stop: int) -> np.ndarray:
+        """freq_axis of the combined-data script, for the channels start:stop."""
+        low = self.center_mhz - self.bandwidth_mhz / 2
+        bin_size = self.bandwidth_mhz / channel_count
+        return self._ordered(np.linspace(low + start * bin_size, low + stop * bin_size, stop - start))
 
 
 # ------------------------------------------------------------------------------
@@ -71,11 +89,11 @@ def load_arrays(file_path: Path, dataset_names: tuple[str, ...]) -> dict[str, np
 
 
 def load_phase_rotation(calibration_path: Path, channel_count: int) -> np.ndarray:
-    """Per-channel rotation from rf_path_phase.dat (degrees), as in the original script."""
-    phase_degrees = np.loadtxt(calibration_path, dtype=float, delimiter=",")
-    if phase_degrees.size != channel_count:
-        raise ValueError(f"expected {channel_count} channels, found {phase_degrees.size}")
-    return np.exp(1j * np.deg2rad(phase_degrees))
+    """rotate = 1j**(phase_input/90) from rf_path_phase.dat, as in the original script."""
+    phase_input = np.loadtxt(calibration_path, dtype=float, delimiter=",")
+    if phase_input.size != channel_count:
+        raise ValueError(f"expected {channel_count} channels, found {phase_input.size}")
+    return 1j ** (phase_input / 90)
 
 
 def collect_window(
@@ -106,42 +124,42 @@ def collect_window(
 
 
 # ------------------------------------------------------------------------------
-# Calculations
+# The original formulas
 # ------------------------------------------------------------------------------
 def power_db(values: np.ndarray) -> np.ndarray:
-    """10*log10(|x|^2), as in the original scripts, without log(0) warnings."""
+    """10*log10(np.abs(x)**2), with a floor so an exact zero does not give -inf."""
     return 10 * np.log10(np.maximum(np.abs(values) ** 2, np.finfo(float).tiny))
 
 
-def coherence(corr: np.ndarray, acorr1: np.ndarray, acorr2: np.ndarray) -> np.ndarray:
-    """Normalised correlation |rho| = |cross| / sqrt(|auto1| * |auto2|), from 0 to 1.
-
-    The original plotted the complex ratio, and matplotlib silently kept the real part,
-    which swings with the phase instead of showing how correlated the two signals are.
-    """
-    denominator = np.sqrt(np.abs(acorr1) * np.abs(acorr2))
-    return np.divide(np.abs(corr), denominator, out=np.full(denominator.shape, np.nan), where=denominator > 0)
+def pearson_real(corr: np.ndarray, acorr1: np.ndarray, acorr2: np.ndarray) -> np.ndarray:
+    """corr / sqrt(acorr1 * acorr2); plt.plot() of this complex array showed its real part."""
+    denominator = np.sqrt(acorr1 * acorr2)
+    ratio = np.divide(corr, denominator, out=np.full(corr.shape, np.nan + 0j), where=denominator != 0)
+    return ratio.real
 
 
 def phase_degrees(values: np.ndarray) -> np.ndarray:
+    """np.rad2deg(np.angle(x))"""
     return np.rad2deg(np.angle(values))
 
 
-def spectrogram_grid(timestamps: np.ndarray, power: np.ndarray) -> tuple[np.ndarray, float, float]:
-    """(columns x channels, start, end): real gaps stay blank, long spans are averaged down.
+def to_local_times(timestamps: np.ndarray, timezone: ZoneInfo) -> pd.DatetimeIndex:
+    times = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(timezone)
+    return times.tz_localize(None)
 
-    A browser or image cannot show more columns than it has pixels; one hour is ~7000 spectra.
-    """
-    if timestamps.size == 1:
-        return power, float(timestamps[0]), float(timestamps[0]) + 1.0
+
+def spectrogram_grid(timestamps: np.ndarray, power: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(column times, columns x channels). Real gaps stay blank; long spans are averaged."""
+    if timestamps.size < 2:
+        return timestamps, power
 
     steps = np.diff(timestamps)
     step = float(np.median(steps))
-    start, end = float(timestamps[0]), float(timestamps[-1]) + step
     if timestamps.size <= MAX_SPECTROGRAM_COLUMNS and steps.max() <= 3 * step:
-        return power, start, end
+        return timestamps, power
 
-    # Bins wider than the sample step, so normal timing jitter does not leave empty columns.
+    # Bins wider than the sample step, so normal timing jitter leaves no empty columns.
+    start, end = float(timestamps[0]), float(timestamps[-1]) + step
     columns = max(1, min(MAX_SPECTROGRAM_COLUMNS, int((end - start) / (1.5 * step))))
     positions = np.minimum(((timestamps - start) / (end - start) * columns).astype(int), columns - 1)
     totals = np.zeros((columns, power.shape[1]))
@@ -149,187 +167,188 @@ def spectrogram_grid(timestamps: np.ndarray, power: np.ndarray) -> tuple[np.ndar
     np.add.at(totals, positions, power)
     np.add.at(counts, positions, 1)
     with np.errstate(invalid="ignore", divide="ignore"):
-        return totals / counts[:, None], start, end
+        grid = totals / counts[:, None]
+    return start + (np.arange(columns) + 0.5) * (end - start) / columns, grid
 
 
 # ------------------------------------------------------------------------------
-# Plot helpers
+# Chart helpers
 # ------------------------------------------------------------------------------
-def _new_figure(rows: int, height: float, *, height_ratios: list[float] | None = None):
-    from matplotlib.figure import Figure
+def _new_figure(rows: int, height: int, *, row_heights: list[float] | None = None):
+    from plotly.subplots import make_subplots
 
-    figure = Figure(figsize=(11, height), layout="constrained")
-    axes = figure.subplots(rows, 1, sharex=True, squeeze=False, height_ratios=height_ratios)[:, 0]
-    for axis in axes:
-        axis.grid(True, alpha=0.35)
-    return figure, axes
-
-
-def _to_png(figure) -> bytes:
-    buffer = BytesIO()
-    figure.savefig(buffer, format="png", dpi=PLOT_DPI)
-    return buffer.getvalue()
-
-
-def _format_time_axis(axis, timezone: ZoneInfo, time_format: str) -> None:
-    from matplotlib import dates
-
-    axis.xaxis_date(tz=timezone)
-    axis.xaxis.set_major_locator(dates.AutoDateLocator(tz=timezone, minticks=5, maxticks=10))
-    axis.xaxis.set_major_formatter(dates.DateFormatter(time_format, tz=timezone))
-    axis.set_xlabel(f"Time ({timezone.key.split('/')[-1] if timezone.key != 'Asia/Kolkata' else 'IST'})")
-
-
-def _plot_phase_over_time(axis, days: np.ndarray, phase: np.ndarray, fixed_range: bool) -> None:
-    # Dots, not a line: phase wraps at +/-180 and a line would draw false vertical jumps.
-    axis.plot(days, phase, ".", markersize=3)
-    axis.axhline(0, color="red", linewidth=1)
-    axis.set_ylabel("Phase (deg)")
-    if fixed_range:
-        axis.set_ylim(-180, 180)
-        axis.set_yticks([-180, -90, 0, 90, 180])
-
-
-def _plot_spectrogram(axis, timestamps: np.ndarray, power: np.ndarray, frequencies: np.ndarray) -> None:
-    grid, start, end = spectrogram_grid(timestamps, power)
-    # Sort channels so the image runs from low to high frequency whichever way the band runs.
-    grid = grid[:, np.argsort(frequencies)]
-    half_width = abs(frequencies[1] - frequencies[0]) / 2 if frequencies.size > 1 else 0.5
-    limits = np.nanpercentile(grid, [2, 98]) if np.any(np.isfinite(grid)) else (None, None)
-    image = axis.imshow(
-        grid.T,
-        origin="lower",
-        aspect="auto",
-        interpolation="nearest",
-        extent=(
-            start / SECONDS_PER_DAY,
-            end / SECONDS_PER_DAY,
-            frequencies.min() - half_width,
-            frequencies.max() + half_width,
-        ),
-        vmin=limits[0],
-        vmax=limits[1],
+    figure = make_subplots(
+        rows=rows, cols=1, shared_xaxes=True, vertical_spacing=0.022 if rows > 1 else 0.0, row_heights=row_heights
     )
-    axis.grid(False)
-    axis.set_ylabel("Frequency (MHz)")
-    colorbar_axis = axis.inset_axes([1.012, 0.0, 0.015, 1.0])
-    axis.figure.colorbar(image, cax=colorbar_axis, label="Cross power (dB, arb.)")
+    figure.update_layout(
+        height=height,
+        margin={"l": 78, "r": 28, "t": 34, "b": 52},
+        paper_bgcolor=SURFACE,
+        plot_bgcolor=SURFACE,
+        font={"color": TEXT_SECONDARY, "size": 12},
+        hovermode="x unified",
+        hoverlabel={"bgcolor": "#14294a", "font": {"color": TEXT_PRIMARY}, "bordercolor": GRID},
+        legend={"orientation": "h", "x": 1, "xanchor": "right", "y": 1.0, "yanchor": "bottom"},
+        showlegend=False,
+    )
+    figure.update_xaxes(gridcolor=GRID, zeroline=False, linecolor=GRID, ticks="", showspikes=True, spikemode="across",
+                        spikethickness=1, spikecolor=TEXT_SECONDARY, spikedash="solid")
+    figure.update_yaxes(gridcolor=GRID, zeroline=False, linecolor=GRID, ticks="", exponentformat="SI")
+    return figure
+
+
+def _axis_title(figure, row: int, title: str) -> None:
+    figure.update_yaxes(title_text=title, title_font={"color": TEXT_PRIMARY, "size": 12}, row=row, col=1)
+
+
+def _line(x, y, name: str, color: str = SERIES_1, *, gl: bool = False, width: float = 2.0, legend: bool = False):
+    from plotly import graph_objects as go
+
+    trace = go.Scattergl if gl else go.Scatter
+    return trace(x=x, y=y, name=name, mode="lines", line={"color": color, "width": width}, showlegend=legend)
+
+
+def _dots(x, y, name: str, *, gl: bool = False, size: int = 5):
+    from plotly import graph_objects as go
+
+    trace = go.Scattergl if gl else go.Scatter
+    return trace(x=x, y=y, name=name, mode="markers", marker={"color": SERIES_1, "size": size}, showlegend=False)
+
+
+def _add_spectrogram(figure, row: int, timestamps, power, frequencies, timezone: ZoneInfo) -> None:
+    from plotly import graph_objects as go
+
+    column_times, grid = spectrogram_grid(timestamps, power)
+    limits = np.nanpercentile(grid, [2, 98])
+    axis_name = "yaxis" if row == 1 else f"yaxis{row}"
+    domain = figure.layout[axis_name].domain
+    figure.add_trace(
+        go.Heatmap(
+            x=to_local_times(column_times, timezone),
+            y=np.round(frequencies, 3),
+            z=np.round(grid.T, 1),
+            zmin=float(limits[0]),
+            zmax=float(limits[1]),
+            colorscale=HEATMAP_SCALE,
+            hoverongaps=False,
+            hovertemplate="%{x|%H:%M:%S}<br>%{y:.2f} MHz<br>%{z:.1f} dB<extra></extra>",
+            colorbar={
+                "title": {"text": "dB", "font": {"color": TEXT_PRIMARY}},
+                "thickness": 12,
+                "outlinewidth": 0,
+                "y": sum(domain) / 2,
+                "len": domain[1] - domain[0],
+                "yanchor": "middle",
+            },
+        ),
+        row=row,
+        col=1,
+    )
+    _axis_title(figure, row, "Frequency (MHz)")
+
+
+def _finish(figure, row: int, x_title: str, revision: str, time_format: str | None = None, times=None) -> dict:
+    figure.update_xaxes(title_text=x_title, title_font={"color": TEXT_PRIMARY, "size": 12}, row=row, col=1)
+    if time_format:
+        figure.update_xaxes(tickformat=time_format, hoverformat="%H:%M:%S", range=[times[0], times[-1]])
+    # Keeps the operator's zoom across page refreshes until new data arrives.
+    figure.update_layout(uirevision=revision)
+    return figure.to_plotly_json()
 
 
 # ------------------------------------------------------------------------------
 # The four plots
 # ------------------------------------------------------------------------------
-def plot_spectrum(arrays: dict[str, np.ndarray], index: int, band: Band, timezone: ZoneInfo, file_name: str) -> bytes:
-    """Original Pearson_Corr_coeff.png: one spectrum across the band."""
-    from datetime import datetime
-
+def spectrum_figure(arrays: dict[str, np.ndarray], index: int, revision: str) -> dict:
+    """pearson_CC: Pearson_Corr_coeff.png. One spectrum against channel number."""
     corr = arrays["corr_spec_avg"][index]
     acorr1 = arrays["acorr_spec_avg1"][index]
     acorr2 = arrays["acorr_spec_avg2"][index]
-    frequencies = band.channel_frequencies(corr.size)
-    spectrum_time = datetime.fromtimestamp(float(arrays["timestamp"][index]), timezone)
+    channels = np.arange(corr.size)
 
-    figure, axes = _new_figure(5, 10.5)
-    figure.suptitle(
-        f"Spectrum {index + 1} of {arrays['corr_spec_avg'].shape[0]} · "
-        f"{spectrum_time:%Y-%m-%d %H:%M:%S} IST\n{file_name}",
-        fontsize=11,
-    )
-    axes[0].plot(frequencies, power_db(acorr1))
-    axes[0].set_ylabel("Auto-corr. 1\npower (dB, arb.)")
-    axes[1].plot(frequencies, power_db(acorr2))
-    axes[1].set_ylabel("Auto-corr. 2\npower (dB, arb.)")
-    axes[2].plot(frequencies, power_db(corr))
-    axes[2].set_ylabel("Cross power\n(dB, arb.)")
-    rho = coherence(corr, acorr1, acorr2)
-    axes[3].plot(frequencies, rho)
-    # Scale to the data: |rho| is often ~0.02 on sky, and a fixed 0-1 axis would flatten it.
-    peak = np.nanmax(rho) if np.any(np.isfinite(rho)) else 1.0
-    axes[3].set_ylim(0, min(1.0, max(0.05, peak * 1.15)))
-    axes[3].set_ylabel("Pearson correlation\n|ρ|")
-    axes[4].plot(frequencies, phase_degrees(corr), ".", markersize=4)
-    axes[4].set_ylim(-180, 180)
-    axes[4].set_yticks([-180, -90, 0, 90, 180])
-    axes[4].set_ylabel("Cross phase (deg)")
-    axes[4].set_xlabel("Frequency (MHz)")
-    axes[4].set_xlim(frequencies.min(), frequencies.max())
-
-    # Channel numbers along the top, for comparing with the acquisition logs.
-    first, step = frequencies[0], frequencies[1] - frequencies[0]
-    channel_axis = axes[0].secondary_xaxis(
-        "top", functions=(lambda mhz: (mhz - first) / step, lambda channel: first + channel * step)
-    )
-    channel_axis.set_xlabel("Channel number")
-    return _to_png(figure)
+    figure = _new_figure(5, 980)
+    figure.add_trace(_line(channels, power_db(acorr1), "Auto-corr. 1"), row=1, col=1)
+    _axis_title(figure, 1, "Auto-corr. 1 (dB)")
+    figure.add_trace(_line(channels, power_db(acorr2), "Auto-corr. 2"), row=2, col=1)
+    _axis_title(figure, 2, "Auto-corr. 2 (dB)")
+    figure.add_trace(_line(channels, power_db(corr), "Cross power"), row=3, col=1)
+    figure.update_yaxes(range=[20, 125], row=3, col=1)
+    _axis_title(figure, 3, "Cross power (dB)")
+    figure.add_trace(_line(channels, pearson_real(corr, acorr1, acorr2), "Pearson corr."), row=4, col=1)
+    _axis_title(figure, 4, "Pearson corr.")
+    figure.add_trace(_dots(channels, phase_degrees(corr), "Phase"), row=5, col=1)
+    figure.update_yaxes(range=[-180, 180], tickvals=[-180, -90, 0, 90, 180], row=5, col=1)
+    _axis_title(figure, 5, "Phase (deg)")
+    return _finish(figure, 5, "Channel number", revision)
 
 
-def plot_file_summary(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, file_name: str) -> bytes:
-    """Original cc_tseries_phase.png: one file, averaged over the band."""
+def file_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, revision: str) -> dict:
+    """cc_tseries_phase: cc_tseries_phase.png. One file, averaged over every channel."""
     timestamps = arrays["timestamp"]
     corr = arrays["corr_spec_avg"]
     average = np.mean(corr, axis=1)
-    days = timestamps / SECONDS_PER_DAY
+    times = to_local_times(timestamps, timezone)
 
-    figure, axes = _new_figure(3, 8.5, height_ratios=[1, 1.2, 1])
-    figure.suptitle(f"Band-averaged cross-correlation · {file_name}", fontsize=11)
-    axes[0].plot(days, average.real, label="Real")
-    axes[0].plot(days, average.imag, label="Imaginary")
-    axes[0].set_ylabel("Cross-corr. (arb.)")
-    axes[0].legend(loc="center right", ncols=2)
-    _plot_spectrogram(axes[1], timestamps, power_db(corr), band.channel_frequencies(corr.shape[1]))
-    _plot_phase_over_time(axes[2], days, phase_degrees(average), fixed_range=False)
-    _format_time_axis(axes[2], timezone, "%H:%M:%S")
-    return _to_png(figure)
+    figure = _new_figure(3, 780, row_heights=[1, 1.25, 1])
+    figure.add_trace(_line(times, average.real, "Real", legend=True), row=1, col=1)
+    figure.add_trace(_line(times, average.imag, "Imaginary", SERIES_2, legend=True), row=1, col=1)
+    figure.update_layout(showlegend=True)
+    _axis_title(figure, 1, "Cross-corr. (arb.)")
+    _add_spectrogram(figure, 2, timestamps, power_db(corr), band.full_axis(corr.shape[1]), timezone)
+    figure.add_trace(_line(times, phase_degrees(average), "Phase"), row=3, col=1)
+    figure.add_hline(y=0, line={"color": TEXT_SECONDARY, "width": 1, "dash": "dash"}, row=3, col=1)
+    _axis_title(figure, 3, "Phase (deg)")
+    return _finish(figure, 3, "Time (IST)", revision, "%H:%M:%S", times)
 
 
-def plot_spectrogram(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, file_name: str) -> bytes:
-    """Original spectrogram.png: time against frequency for one file."""
+def spectrogram_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, revision: str) -> dict:
+    """spectrogram: spectrogram.png. Time against frequency for one file."""
     corr = arrays["corr_spec_avg"]
-    figure, axes = _new_figure(1, 5.5)
-    figure.suptitle(f"Cross-correlation spectrogram · {file_name}", fontsize=11)
-    _plot_spectrogram(axes[0], arrays["timestamp"], power_db(corr), band.channel_frequencies(corr.shape[1]))
-    _format_time_axis(axes[0], timezone, "%H:%M:%S")
-    return _to_png(figure)
+    figure = _new_figure(1, 560)
+    _add_spectrogram(figure, 1, arrays["timestamp"], power_db(corr), band.full_axis(corr.shape[1]), timezone)
+    return _finish(figure, 1, "Time (IST)", revision, "%H:%M:%S", to_local_times(arrays["timestamp"], timezone))
 
 
-def plot_window(
+def window_figure(
     timestamps: np.ndarray,
     corr: np.ndarray,
     pa_power: np.ndarray,
     band: Band,
     channel_range: tuple[int, int],
     timezone: ZoneInfo,
-    *,
-    calibration_note: str,
-) -> bytes:
-    """Original one_hr_plot.png: the last hour over a slice of the band."""
-    from datetime import datetime
-
+    revision: str,
+) -> dict:
+    """one_hr_plot: one_hr_plot.png. The last hour over a slice of the band."""
     channel_count = corr.shape[1]
     start_channel = max(0, min(channel_range[0], channel_count - 1))
     stop_channel = max(start_channel + 1, min(channel_range[1], channel_count))
-    frequencies = band.channel_frequencies(channel_count)[start_channel:stop_channel]
     corr_slice = corr[:, start_channel:stop_channel]
     average = np.mean(corr_slice, axis=1)
-    days = timestamps / SECONDS_PER_DAY
-    first = datetime.fromtimestamp(float(timestamps[0]), timezone)
-    last = datetime.fromtimestamp(float(timestamps[-1]), timezone)
+    times = to_local_times(timestamps, timezone)
 
-    figure, axes = _new_figure(5, 11.5, height_ratios=[1, 1, 1, 1.4, 1])
-    figure.suptitle(
-        f"{first:%Y-%m-%d %H:%M:%S} to {last:%H:%M:%S} IST · channels {start_channel}:{stop_channel} "
-        f"({frequencies.min():.2f}–{frequencies.max():.2f} MHz) · {calibration_note}",
-        fontsize=11,
+    figure = _new_figure(5, 1080, row_heights=[1, 1, 1, 1.35, 1])
+    figure.add_trace(
+        _line(times, np.mean(pa_power[:, start_channel:stop_channel], axis=1), "PA power", gl=True, width=1.2),
+        row=1,
+        col=1,
     )
-    axes[0].plot(days, np.mean(pa_power[:, start_channel:stop_channel], axis=1), linewidth=0.8)
-    axes[0].set_ylabel("PA power (arb.)")
-    axes[1].plot(days, power_db(average), linewidth=0.8)
-    axes[1].set_ylabel("Cross power\n(dB, arb.)")
-    axes[2].plot(days, average.real, linewidth=0.8, label="Real")
-    axes[2].plot(days, average.imag, linewidth=0.8, label="Imaginary")
-    axes[2].set_ylabel("Cross-corr. (arb.)")
-    axes[2].legend(loc="upper right")
-    _plot_spectrogram(axes[3], timestamps, power_db(corr_slice), frequencies)
-    _plot_phase_over_time(axes[4], days, phase_degrees(average), fixed_range=True)
-    _format_time_axis(axes[4], timezone, "%H:%M")
-    return _to_png(figure)
+    _axis_title(figure, 1, "PA power (arb.)")
+    figure.add_trace(_line(times, np.abs(average) ** 2, "Corr. power", gl=True, width=1.2), row=2, col=1)
+    _axis_title(figure, 2, "Corr. power (arb.)")
+    figure.add_trace(_line(times, average.real, "Real", gl=True, width=1.2, legend=True), row=3, col=1)
+    figure.add_trace(_line(times, average.imag, "Imaginary", SERIES_2, gl=True, width=1.2, legend=True), row=3, col=1)
+    figure.update_layout(showlegend=True)
+    _axis_title(figure, 3, "Cross-corr. (arb.)")
+    _add_spectrogram(
+        figure,
+        4,
+        timestamps,
+        power_db(corr_slice),
+        band.slice_axis(channel_count, start_channel, stop_channel),
+        timezone,
+    )
+    figure.add_trace(_dots(times, phase_degrees(average), "Phase", gl=True, size=3), row=5, col=1)
+    figure.add_hline(y=0, line={"color": TEXT_SECONDARY, "width": 1, "dash": "dash"}, row=5, col=1)
+    figure.update_yaxes(range=[-180, 180], tickvals=[-180, -90, 0, 90, 180], row=5, col=1)
+    _axis_title(figure, 5, "Phase (deg)")
+    return _finish(figure, 5, "Time (IST)", revision, "%H:%M", times)

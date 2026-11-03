@@ -23,7 +23,7 @@ except ModuleNotFoundError:
     h5py = None
 
 try:
-    import matplotlib  # noqa: F401
+    import plotly  # noqa: F401
     import diagnostics
 except ModuleNotFoundError:
     diagnostics = None
@@ -1098,8 +1098,8 @@ def get_phase_calibration_path(configured_path: str) -> Path | None:
     return next((path for path in candidates if path.is_file()), None)
 
 
-# Plots are cached as finished images. The file's modification time is part of each cache
-# key, so a figure is drawn once per file; page refreshes in between cost almost nothing.
+# Each chart is built once per file: the file's modification time is part of the cache key,
+# so page refreshes in between reuse the finished chart and cost almost nothing.
 @st.cache_data(show_spinner=False, max_entries=64)
 def load_spectra(file_path: str, modified_ts: float) -> dict[str, np.ndarray]:
     return diagnostics.load_arrays(Path(file_path), diagnostics.SPECTRUM_DATASETS)
@@ -1117,121 +1117,179 @@ def get_newest_readable_file(files: list[Path]) -> Path | None:
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def spectrum_png(file_path: str, modified_ts: float, index: int, band: diagnostics.Band) -> bytes:
+def spectrum_chart(file_path: str, modified_ts: float, index: int) -> dict:
     arrays = load_spectra(file_path, modified_ts)
-    return diagnostics.plot_spectrum(arrays, index, band, APP_TIMEZONE, Path(file_path).name)
+    return diagnostics.spectrum_figure(arrays, index, f"{file_path}:{index}")
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
-def file_summary_png(file_path: str, modified_ts: float, band: diagnostics.Band) -> bytes:
+def file_chart(file_path: str, modified_ts: float, band: diagnostics.Band) -> dict:
     arrays = load_spectra(file_path, modified_ts)
-    return diagnostics.plot_file_summary(arrays, band, APP_TIMEZONE, Path(file_path).name)
+    return diagnostics.file_figure(arrays, band, APP_TIMEZONE, file_path)
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
-def spectrogram_png(file_path: str, modified_ts: float, band: diagnostics.Band) -> bytes:
+def spectrogram_chart(file_path: str, modified_ts: float, band: diagnostics.Band) -> dict:
     arrays = load_spectra(file_path, modified_ts)
-    return diagnostics.plot_spectrogram(arrays, band, APP_TIMEZONE, Path(file_path).name)
+    return diagnostics.spectrogram_figure(arrays, band, APP_TIMEZONE, file_path)
 
 
 @st.cache_data(show_spinner=False, max_entries=4)
-def last_hour_png(
+def last_hour_chart(
     file_paths: tuple[str, ...],
     end_timestamp: float,
     band: diagnostics.Band,
     channel_range: tuple[int, int],
     calibration_path: str | None,
-) -> tuple[bytes | None, str]:
-    """(image, note): the note says whether the phase calibration was applied."""
+) -> tuple[dict | None, str]:
+    """(chart, note): the note says whether the phase calibration was applied."""
     timestamps, corr, pa_power = diagnostics.collect_window(
         [Path(path) for path in file_paths], end_timestamp, 3600
     )
     if not timestamps.size:
         return None, "No readable samples in the last hour."
 
-    note = "phase uncalibrated"
+    note = f"Phase uncalibrated: `{PHASE_CALIBRATION_FILE}` not found."
     if calibration_path:
         try:
             corr = corr * diagnostics.load_phase_rotation(Path(calibration_path), corr.shape[1])
-            note = f"phase calibrated ({Path(calibration_path).name})"
+            note = f"Phase calibrated with `{Path(calibration_path).name}`."
         except (OSError, ValueError) as exc:
-            note = f"phase uncalibrated: {exc}"
-    image = diagnostics.plot_window(
-        timestamps, corr, pa_power, band, channel_range, APP_TIMEZONE, calibration_note=note
+            note = f"Phase uncalibrated: {exc}"
+    chart = diagnostics.window_figure(
+        timestamps, corr, pa_power, band, channel_range, APP_TIMEZONE, str(end_timestamp)
     )
-    return image, note
+    return chart, note
+
+
+def inject_diagnostic_styles() -> None:
+    """Navy surface for this tab, matching the sidebar cards, so charts and labels stay readable."""
+    st.markdown(
+        f"""
+        <style>
+        /* The app paints every tab block pink; clear that around this tab only. */
+        .stTabs div[data-testid="stVerticalBlock"]:has(.st-key-dart_diagnostics) {{
+            background-color: transparent !important;
+        }}
+        .stTabs .st-key-dart_diagnostics {{
+            background-color: {diagnostics.SURFACE} !important;
+            border: 1px solid rgba(145, 196, 255, 0.22);
+            border-radius: 18px;
+            padding: 1.25rem 1.25rem 1rem;
+        }}
+        .stTabs .st-key-dart_diagnostics div[data-testid="stVerticalBlock"] {{
+            background-color: transparent !important;
+            color: {diagnostics.TEXT_PRIMARY} !important;
+        }}
+        .st-key-dart_diagnostics h3,
+        .st-key-dart_diagnostics [data-testid="stWidgetLabel"] p,
+        .st-key-dart_diagnostics [data-testid="stMarkdownContainer"] p,
+        .st-key-dart_diagnostics [data-testid="stTickBarMin"],
+        .st-key-dart_diagnostics [data-testid="stTickBarMax"],
+        .st-key-dart_diagnostics button[aria-selected="false"] p {{
+            color: {diagnostics.TEXT_PRIMARY} !important;
+        }}
+        .st-key-dart_diagnostics [data-testid="stCaptionContainer"] p {{
+            color: {diagnostics.TEXT_SECONDARY} !important;
+            font-variant-numeric: tabular-nums;
+        }}
+        .st-key-dart_diagnostics code {{
+            background: rgba(145, 196, 255, 0.14);
+            color: {diagnostics.TEXT_PRIMARY};
+            overflow-wrap: anywhere;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 @st.fragment(run_every=get_fragment_refresh_seconds())
 def render_live_diagnostic_plots() -> None:
-    """HDF5 plots drawn on the server; no PNG files or second Streamlit application."""
+    """HDF5 plots drawn directly in the page; no PNG files or second Streamlit application."""
     if h5py is None or diagnostics is None:
-        st.error("Install the project's `h5py` and `matplotlib` dependencies and restart DART.")
+        st.error("Tab 3 needs the `h5py` and `plotly` packages. Install them in this environment and restart DART.")
         return
 
-    files, skipped_empty = diagnostics.list_candidate_files(LIVE_HDF5_DIR)
-    newest = get_newest_readable_file(files)
-    if newest is None:
-        st.info(f"Waiting for readable HDF5 files in `{LIVE_HDF5_DIR}`")
-        return
+    inject_diagnostic_styles()
+    with st.container(key="dart_diagnostics"):
+        files, skipped_empty = diagnostics.list_candidate_files(LIVE_HDF5_DIR)
+        newest = get_newest_readable_file(files)
+        if newest is None:
+            st.info(f"Waiting for readable HDF5 files in `{LIVE_HDF5_DIR}`")
+            return
 
-    settings = get_runtime_settings()["diagnostics"]
-    band = diagnostics.Band(
-        settings["center_frequency_mhz"], settings["bandwidth_mhz"], settings["channel0_is_high"]
-    )
+        settings = get_runtime_settings()["diagnostics"]
+        band = diagnostics.Band(
+            settings["center_frequency_mhz"], settings["bandwidth_mhz"], settings["channel0_is_high"]
+        )
 
-    st.subheader("Live HDF5 diagnostic plots")
-    recent_files = [path.name for path in reversed(files[-DIAGNOSTIC_FILE_CHOICES:])]
-    choice = st.selectbox(
-        "HDF5 file",
-        options=[LATEST_FILE_CHOICE] + recent_files,
-        key="diagnostic_file_choice",
-    )
-    selected = newest if choice == LATEST_FILE_CHOICE else LIVE_HDF5_DIR / choice
-    try:
-        selected_ts = selected.stat().st_mtime
-        arrays = load_spectra(str(selected), selected_ts)
-    except diagnostics.UNREADABLE_FILE_ERRORS as exc:
-        st.warning(f"Could not read `{selected.name}`: {exc}. Choose another file.")
-        return
+        st.subheader("Live HDF5 diagnostics")
+        recent_files = [path.name for path in reversed(files[-DIAGNOSTIC_FILE_CHOICES:])]
+        choice = st.selectbox(
+            "HDF5 file",
+            options=[LATEST_FILE_CHOICE] + recent_files,
+            key="diagnostic_file_choice",
+        )
+        selected = newest if choice == LATEST_FILE_CHOICE else LIVE_HDF5_DIR / choice
+        try:
+            selected_ts = selected.stat().st_mtime
+            arrays = load_spectra(str(selected), selected_ts)
+        except diagnostics.UNREADABLE_FILE_ERRORS as exc:
+            st.warning(f"Could not read `{selected.name}`: {exc}. Choose another file.")
+            return
 
-    skipped_note = f" · {skipped_empty} empty files ignored" if skipped_empty else ""
-    st.caption(f"Showing `{selected.name}` · {len(files)} files available{skipped_note}")
+        skipped_note = f" · {skipped_empty} empty files ignored" if skipped_empty else ""
+        st.caption(f"`{selected.name}` · {len(files)} files available{skipped_note}")
 
-    spectrum_tab, file_tab, spectrogram_tab, hour_tab = st.tabs(
-        ["Spectrum / Pearson", "This file", "Spectrogram", "Last hour"]
-    )
-    with spectrum_tab:
-        spectrum_count = arrays["corr_spec_avg"].shape[0]
-        index = spectrum_count
-        if spectrum_count > 1:
-            index = st.slider(
-                "Spectrum in this file",
-                min_value=1,
-                max_value=spectrum_count,
-                value=spectrum_count,
-                key=f"diagnostic_spectrum_{selected.name}",
+        chart_options = {"displaylogo": False, "scrollZoom": False}
+        spectrum_tab, file_tab, spectrogram_tab, hour_tab = st.tabs(
+            ["Pearson / phase", "This file", "Spectrogram", "Last hour"]
+        )
+        with spectrum_tab:
+            spectrum_count = arrays["corr_spec_avg"].shape[0]
+            shown = min(diagnostics.ORIGINAL_SPECTRUM_INDEX + 1, spectrum_count)
+            if spectrum_count > 1:
+                shown = st.slider(
+                    "Spectrum in this file",
+                    min_value=1,
+                    max_value=spectrum_count,
+                    value=shown,
+                    key=f"diagnostic_spectrum_{selected.name}",
+                )
+            spectrum_time = format_ist_timestamp(float(arrays["timestamp"][shown - 1]))
+            st.caption(f"Spectrum {shown} of {spectrum_count} · {spectrum_time}")
+            st.plotly_chart(
+                spectrum_chart(str(selected), selected_ts, shown - 1),
+                width="stretch", config=chart_options, key="diagnostic_spectrum_chart",
             )
-        st.image(spectrum_png(str(selected), selected_ts, index - 1, band), width="stretch")
-    with file_tab:
-        st.image(file_summary_png(str(selected), selected_ts, band), width="stretch")
-    with spectrogram_tab:
-        st.image(spectrogram_png(str(selected), selected_ts, band), width="stretch")
-    with hour_tab:
-        calibration_path = get_phase_calibration_path(settings["phase_calibration_file"])
-        with st.spinner("Collecting the last hour of files..."):
-            image, note = last_hour_png(
-                tuple(str(path) for path in files),
-                float(arrays["timestamp"][-1]),
-                band,
-                (settings["hour_channel_start"], settings["hour_channel_stop"]),
-                str(calibration_path) if calibration_path else None,
+        with file_tab:
+            st.caption("Averaged over all channels. Drag across a panel to zoom; double-click to reset.")
+            st.plotly_chart(
+                file_chart(str(selected), selected_ts, band),
+                width="stretch", config=chart_options, key="diagnostic_file_chart",
             )
-        if image is None:
-            st.info(note)
-        else:
-            st.image(image, width="stretch")
-            st.caption(f"Hour ending at the selected file · {note}")
+        with spectrogram_tab:
+            st.plotly_chart(
+                spectrogram_chart(str(selected), selected_ts, band),
+                width="stretch", config=chart_options, key="diagnostic_spectrogram_chart",
+            )
+        with hour_tab:
+            calibration_path = get_phase_calibration_path(settings["phase_calibration_file"])
+            channel_range = (settings["hour_channel_start"], settings["hour_channel_stop"])
+            with st.spinner("Collecting the last hour of files..."):
+                chart, note = last_hour_chart(
+                    tuple(str(path) for path in files),
+                    float(arrays["timestamp"][-1]),
+                    band,
+                    channel_range,
+                    str(calibration_path) if calibration_path else None,
+                )
+            if chart is None:
+                st.info(note)
+            else:
+                st.caption(f"Channels {channel_range[0]}:{channel_range[1]} · hour ending at this file · {note}")
+                st.plotly_chart(chart, width="stretch", config=chart_options, key="diagnostic_hour_chart")
 
 
 def main() -> None:
