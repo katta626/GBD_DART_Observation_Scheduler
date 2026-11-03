@@ -183,18 +183,39 @@ def sync_runtime_config() -> dict:
     return runtime_settings
 
 
+BACKGROUND_MAX_WIDTH = 1920
+
+
+@st.cache_data(show_spinner=False)
+def encode_background_image(image_path: str, modified_ts: float) -> str:
+    """Shrink the background once (it is ~6 MB as PNG) and return it as a base64 JPEG.
+
+    `modified_ts` is part of the cache key, so replacing dart.png refreshes the cache.
+    """
+    from io import BytesIO
+    from PIL import Image
+
+    with Image.open(image_path) as image:
+        image = image.convert("RGB")
+        if image.width > BACKGROUND_MAX_WIDTH:
+            height = round(image.height * BACKGROUND_MAX_WIDTH / image.width)
+            image = image.resize((BACKGROUND_MAX_WIDTH, height), Image.LANCZOS)
+        buffer = BytesIO()
+        image.save(buffer, format="JPEG", quality=85, optimize=True)
+    return base64.b64encode(buffer.getvalue()).decode()
+
+
 def set_bg_hack(main_bg: str) -> None:
     if not os.path.exists(main_bg):
         return
 
-    with open(main_bg, "rb") as image_file:
-        encoded_image = base64.b64encode(image_file.read()).decode()
+    encoded_image = encode_background_image(main_bg, os.path.getmtime(main_bg))
 
     st.markdown(
         f"""
         <style>
         .stApp {{
-            background: url(data:image/png;base64,{encoded_image});
+            background: url(data:image/jpeg;base64,{encoded_image});
             background-size: cover;
         }}
         </style>
@@ -715,7 +736,18 @@ def render_edit_observation(schedule: dict[str, dict]) -> None:
             st.session_state.edit_mode = False
             st.rerun()
 
-        if st.button("Delete Schedule", type="secondary", key=f"delete_schedule_{selected_pulsar}"):
+        confirm_delete = st.checkbox(
+            f"Yes, delete '{selected_pulsar}' from the schedule",
+            value=False,
+            key=f"confirm_delete_{selected_pulsar}",
+        )
+        if st.button(
+            "Delete Schedule",
+            type="secondary",
+            disabled=not confirm_delete,
+            help="Tick the box above to enable deleting.",
+            key=f"delete_schedule_{selected_pulsar}",
+        ):
             db.delete_observation(selected_pulsar)
             st.warning(f"Deleted schedule for '{selected_pulsar}'.")
             st.session_state.edit_mode = False
@@ -735,6 +767,42 @@ def filter_lines(lines: list[str], keywords: list[str]) -> list[str]:
     return [line for line in lines if any(keyword in line for keyword in keywords)]
 
 
+SCHEDULER_LIVE = "LIVE 🟢"
+SCHEDULER_STOPPED = "DEAD ☠️"
+SCHEDULER_CRASHED = "RESTART ⚠️"
+
+
+def get_scheduler_state(runtime: dict) -> tuple[str, int | None]:
+    """The button label from the real scheduler process, not only the stored status.
+
+    Returns (label, exit_code); exit_code is set when the scheduler died on its own.
+    """
+    proc = runtime.get("proc")
+    if proc is not None and proc.poll() is None:
+        return SCHEDULER_LIVE, None
+
+    status_current = db.get_system_status("status_current") or "❌"
+    if status_current in (SCHEDULER_LIVE, SCHEDULER_CRASHED):
+        # Stored as running, but the process is gone: it was not stopped from this page.
+        exit_code = proc.returncode if proc is not None else None
+        if status_current == SCHEDULER_LIVE:
+            db.update_system_status("status_current", SCHEDULER_CRASHED)
+        return SCHEDULER_CRASHED, exit_code
+    return status_current, None
+
+
+@st.fragment(run_every=get_fragment_refresh_seconds())
+def render_scheduler_health() -> None:
+    label, exit_code = get_scheduler_state(get_runtime_state())
+    if label == SCHEDULER_LIVE:
+        st.caption("Scheduler: 🟢 running")
+    elif label == SCHEDULER_CRASHED:
+        reason = f" (exit code {exit_code})" if exit_code is not None else ""
+        st.error(f"Scheduler stopped unexpectedly{reason}. Press {SCHEDULER_CRASHED} to start it again.")
+    else:
+        st.caption("Scheduler: not running")
+
+
 def main_1() -> None:
     inject_custom_styles()
     set_bg_hack(BACKGROUND_IMAGE_PATH)
@@ -745,7 +813,8 @@ def main_1() -> None:
         st.header("SCHEDULER")
         render_time_panel()
 
-        status_current = db.get_system_status("status_current") or "❌"
+        render_scheduler_health()
+
         sync_process = runtime.get("hdf5_sync_proc")
         sync_running = sync_process is not None and sync_process.poll() is None
         if sync_running:
@@ -775,8 +844,9 @@ def main_1() -> None:
 
         with run_col:
             proc = runtime.get("proc")
-            obs_running = proc is not None and proc.poll() is None
-            if st.button(status_current, type="primary", key="toggle_scheduler"):
+            scheduler_label, _ = get_scheduler_state(runtime)
+            obs_running = scheduler_label == SCHEDULER_LIVE
+            if st.button(scheduler_label, type="primary", key="toggle_scheduler"):
                 if obs_running:
                     if proc:
                         proc.terminate()
@@ -785,14 +855,14 @@ def main_1() -> None:
                         except subprocess.TimeoutExpired:
                             proc.kill()
                         runtime["proc"] = None
-                        db.update_system_status("status_current", "DEAD ☠️")
+                        db.update_system_status("status_current", SCHEDULER_STOPPED)
                         st.warning("Stopped observation.")
                 else:
                     runtime["proc"] = subprocess.Popen(
                         [sys.executable, SCHEDULER_SCRIPT_PATH],
                         cwd=str(PROJECT_ROOT),
                     )
-                    db.update_system_status("status_current", "LIVE 🟢")
+                    db.update_system_status("status_current", SCHEDULER_LIVE)
                     st.success("Started observation.")
 
                 st.rerun()
@@ -804,6 +874,7 @@ def main_1() -> None:
             render_edit_observation(schedule)
 
 
+@st.fragment(run_every=get_fragment_refresh_seconds())
 def render_log_updates_tab() -> None:
     log_files = db.get_system_status("Log_Current") or []
     if isinstance(log_files, str):
@@ -826,12 +897,16 @@ def render_log_updates_tab() -> None:
         st.warning("No log files found in the current run.")
         return
 
+    st.caption(
+        f"Newest lines first · refreshes every {get_fragment_refresh_seconds():g} s · "
+        f"last checked {datetime.now(APP_TIMEZONE).strftime('%H:%M:%S IST')}"
+    )
     for log_file in log_files:
         file_path = os.path.join(LOG_DIR, log_file)
         with st.expander(f"Show Log Updates: {log_file}", expanded=False):
             filtered_lines = filter_lines(read_all_lines(file_path), filter_keywords)
             if filtered_lines:
-                st.text("\n".join(filtered_lines))
+                st.text("\n".join(reversed(filtered_lines)))
             else:
                 st.text("No matching logs yet.")
 
