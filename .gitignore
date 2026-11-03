@@ -7,9 +7,13 @@ log_files/
 # Per-machine settings (production API IP etc.); see dart_settings.local.toml.example
 dart_settings.local.toml
 
+# Local secrets file on the prod machine (a file, not a folder)
+env_variables.shift
+
 # Runtime state: the live schedule database is created automatically and must
 # never be overwritten by a deploy. data_store_default.db stays tracked as a seed.
 data_store.db
+data_store.db-journal
 testing_pipeline/*.db
 
 # Live HDF5 data synced by transient_hdf5/real_time_PDR_monitoring.sh
