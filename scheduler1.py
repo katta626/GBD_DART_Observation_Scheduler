@@ -1,5 +1,6 @@
 import os
 import time
+import re
 from datetime import datetime
 from urllib.parse import quote
 
@@ -10,17 +11,21 @@ from dart_config import (
     APP_TIMEZONE,
     DB_PATH,
     LOG_DIR,
-    QUICK_OBSERVATION_NAME,
-    QUICK_TRIGGER_COUNTDOWN,
-    SCHEDULER_THRESHOLD_SECONDS,
-    STANDARD_TRIGGER_COUNTDOWN,
     get_runtime_settings,
 )
 from pulsar_info import RA, count
-from schedule_time import extract_clock_time, log_date_from_observation_time, normalize_observation_time
+from schedule_time import (
+    OBSERVATION_TIME_FORMAT,
+    extract_clock_time,
+    log_date_from_observation_time,
+    normalize_observation_time,
+)
 
 
 db = DataStore(DB_PATH)
+# Catalogue pulsar names (J0534+2200, J0437-4715, B0329+54) use the ATNF RA lookup;
+# any other name (1pps, search-mode names) is a quick observation with a manual RA.
+CATALOGUE_NAME_PATTERN = re.compile(r"^[JB]\d{4}[+-]\d{2,4}")
 TRIGGER_RETRY_DELAY_SECONDS = 30
 MAX_TRIGGER_RETRY_WINDOW_SECONDS = 120
 _TRIGGER_RETRY_STATE: dict[str, dict[str, float]] = {}
@@ -74,10 +79,14 @@ def handle_completed_observation(pulsar: str, log_name: str, log_current: list[s
         request_timeout_seconds = runtime_settings["network"]["request_timeout_seconds"]
         observation_over_url = runtime_settings["network"]["observation_over_url"]
 
-        requests.post(
-            f"{observation_over_url}?pulsar_name={quote(pulsar)}",
-            timeout=request_timeout_seconds,
-        )
+        try:
+            requests.post(
+                f"{observation_over_url}?pulsar_name={quote(pulsar)}",
+                timeout=request_timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            # The observation is already over locally; still clear the log tracking below.
+            print(f"Could not notify observation-over for {pulsar}: {exc}")
 
         if log_name in log_current:
             log_current.remove(log_name)
@@ -127,10 +136,28 @@ def trigger_observation(payload: dict) -> bool:
         return False
 
 
+def roll_ra_start_to_today(ra_start: str) -> str:
+    """Keep the stored RA clock time but move its date to today (local observatory time)."""
+    try:
+        parsed_ra_start = datetime.strptime(ra_start, OBSERVATION_TIME_FORMAT)
+    except (ValueError, TypeError) as exc:
+        print(f"Could not update RA start date: {exc}")
+        return ra_start
+    today = datetime.now(APP_TIMEZONE).date()
+    return normalize_observation_time(
+        parsed_ra_start.replace(year=today.year, month=today.month, day=today.day)
+    )
+
+
 def update_quick_observation(pulsar: str, data: dict, log_current: list[str]) -> None:
     status = data.get("status", "Not Started")
     duration = int(data.get("duration") or 0)
     ra_start = normalize_observation_time(data.get("ra_start", ""))
+    # Only a waiting observation is re-dated. A running one keeps its date, so an
+    # observation that crosses midnight still finds its <name>_<date>_observation.log.
+    if ra_start and status == "Not Started":
+        ra_start = roll_ra_start_to_today(ra_start)
+
     started_at = normalize_observation_time(data.get("started_at", "")) if data.get("started_at") else None
 
     if status != "Not Started":
@@ -148,11 +175,16 @@ def update_quick_observation(pulsar: str, data: dict, log_current: list[str]) ->
 
     db.update_observation(pulsar, count_down=updated_countdown, ra_start=ra_start, started_at=None)
 
-    if updated_countdown <= SCHEDULER_THRESHOLD_SECONDS:
+    scheduler_settings = get_runtime_settings()["scheduler"]
+    if updated_countdown <= scheduler_settings["threshold_seconds"]:
         if status == "Not Started" and is_retry_window_open(pulsar, duration) and can_retry_trigger(pulsar):
             mark_trigger_attempt(pulsar)
             trigger_sent = trigger_observation(
-                {"target": pulsar, "duration": duration * 2, "countdown": str(QUICK_TRIGGER_COUNTDOWN)}
+                {
+                    "target": pulsar,
+                    "duration": duration * 2,
+                    "countdown": str(scheduler_settings["quick_trigger_countdown"]),
+                }
             )
             if trigger_sent:
                 db.update_observation(pulsar, status="In Progress", started_at=get_current_started_at())
@@ -177,18 +209,22 @@ def update_standard_observation(pulsar: str, data: dict, log_current: list[str])
 
     try:
         next_ra_start, updated_countdown = RA(pulsar)
+        updated_countdown -= (duration * 60) / 2
+        normalized_ra_start = normalize_observation_time(next_ra_start)
+        db.update_observation(pulsar, count_down=updated_countdown, ra_start=normalized_ra_start, started_at=None)
     except Exception:
         return
 
-    updated_countdown -= (duration * 60) / 2
-    normalized_ra_start = normalize_observation_time(next_ra_start)
-    db.update_observation(pulsar, count_down=updated_countdown, ra_start=normalized_ra_start, started_at=None)
-
-    if updated_countdown <= SCHEDULER_THRESHOLD_SECONDS:
+    scheduler_settings = get_runtime_settings()["scheduler"]
+    if updated_countdown <= scheduler_settings["threshold_seconds"]:
         if is_retry_window_open(pulsar, duration) and can_retry_trigger(pulsar):
             mark_trigger_attempt(pulsar)
             trigger_sent = trigger_observation(
-                {"target": pulsar, "duration": duration * 2, "countdown": str(STANDARD_TRIGGER_COUNTDOWN)}
+                {
+                    "target": pulsar,
+                    "duration": duration * 2,
+                    "countdown": str(scheduler_settings["standard_trigger_countdown"]),
+                }
             )
             if trigger_sent:
                 db.update_observation(
@@ -215,10 +251,10 @@ def main() -> None:
             continue
 
         try:
-            if pulsar == QUICK_OBSERVATION_NAME:
-                update_quick_observation(pulsar, data, log_current)
-            else:
+            if CATALOGUE_NAME_PATTERN.match(pulsar):
                 update_standard_observation(pulsar, data, log_current)
+            else:
+                update_quick_observation(pulsar, data, log_current)
         except Exception as exc:
             print(f"Scheduler warning for {pulsar}: {exc}")
 

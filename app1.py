@@ -27,7 +27,6 @@ from dart_config import (
     APP_TIMEZONE,
     ARCHIVE_RECENT_LIMIT,
     BACKGROUND_IMAGE_PATH,
-    CONFIG_PATH,
     DB_PATH,
     FITS_PLOTS_DIR,
     LOG_DIR,
@@ -40,6 +39,7 @@ from dart_config import (
     QUICK_OBSERVATION_COUNTDOWN_SECONDS,
     QUICK_OBSERVATION_NAME,
     SCHEDULER_SCRIPT_PATH,
+    get_config_mtime,
     get_fragment_refresh_seconds,
     get_runtime_settings,
 )
@@ -84,9 +84,15 @@ def start_hdf5_sync_runner(runtime: dict) -> None:
     try:
         HDF5_SYNC_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         log_handle = open(HDF5_SYNC_LOG_PATH, "a", buffering=1)
+        hdf5_sync_settings = get_runtime_settings()["hdf5_sync"]
         runtime["hdf5_sync_proc"] = subprocess.Popen(
             ["bash", str(HDF5_SYNC_SCRIPT)],
             cwd=str(PROJECT_ROOT),
+            env={
+                **os.environ,
+                "DART_HDF5_REMOTE_HOST": hdf5_sync_settings["remote_host"],
+                "DART_HDF5_REMOTE_DIR": hdf5_sync_settings["remote_dir"],
+            },
             stdout=log_handle,
             stderr=subprocess.STDOUT,
             start_new_session=True,
@@ -159,10 +165,7 @@ def sync_runtime_config() -> dict:
     runtime_settings = get_runtime_settings()
     refresh_interval_ms = runtime_settings["ui"]["refresh_interval_ms"]
 
-    try:
-        config_mtime = CONFIG_PATH.stat().st_mtime if CONFIG_PATH.exists() else None
-    except OSError:
-        config_mtime = None
+    config_mtime = get_config_mtime()
 
     previous_refresh_interval_ms = st.session_state.get("config_refresh_interval_ms")
     previous_config_mtime = st.session_state.get("config_mtime")
@@ -513,7 +516,7 @@ def add_schedule_entry(
 
 
 def upsert_quick_observation(duration: int, ra_start, countdown: float, name=QUICK_OBSERVATION_NAME) -> str:
-    existing = db.get_observation(QUICK_OBSERVATION_NAME)
+    existing = db.get_observation(name)
     action = "Updated" if existing else "Added"
     status = "Not Started"
     started_at = None
@@ -572,6 +575,10 @@ def render_add_observation(schedule: dict[str, dict]) -> None:
             name_ra = st.text_input("Name", key="name_ra")
 
             if st.button("Confirm Add", key="confirm_add_search"):
+                name_ra = name_ra.strip() or QUICK_OBSERVATION_NAME
+                if not re.fullmatch(r"[A-Za-z0-9+\-_.]{1,64}", name_ra):
+                    st.error("Name may only contain letters, digits and + - _ .")
+                    return
                 try:
                     duration_minutes = calculate_duration_minutes(start_ra, end_ra)
                     countdown = count(extract_clock_time(start_ra))
@@ -585,7 +592,7 @@ def render_add_observation(schedule: dict[str, dict]) -> None:
                     countdown=countdown,
                     name=name_ra
                 )
-                st.success(f"{action} pulsar '{QUICK_OBSERVATION_NAME}'.")
+                st.success(f"{action} pulsar '{name_ra}'.")
                 st.session_state.add_mode = False
                 st.rerun()
 
@@ -1266,7 +1273,10 @@ def main() -> None:
         render_archive_tab()
 
     with tab3:
-        render_diagnostic_tab()
+        if get_runtime_settings()["ui"]["enable_diagnostics"]:
+            render_diagnostic_tab()
+        else:
+            st.write("Under Construction")
 
 
 if __name__ == "__main__":

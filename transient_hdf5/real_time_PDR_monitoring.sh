@@ -6,8 +6,9 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 local_dir="$script_dir/temp_data/transient_hdf5_data"
 
-# This is the remote archive directory selected for the current observation.
-remote_dir="/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43"
+# Remote archive directory for the current observation. app1.py passes it from
+# [hdf5_sync].remote_dir in the settings; the default keeps the script runnable alone.
+remote_dir="${DART_HDF5_REMOTE_DIR:-/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43}"
 
 # DART app1.py now reads the HDF5 files directly. No PNG-plotting script or
 # separate Streamlit server is started here.

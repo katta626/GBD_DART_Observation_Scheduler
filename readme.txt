@@ -2,8 +2,10 @@
 
 ---------->>>>> BRINGING THE SYSTEM UP
 
-1. conda env create -f environment.yml
-2.  
+1. conda env create -f envirorment_d.yml
+2. conda activate DART_env
+3. cp dart_settings.local.toml.example dart_settings.local.toml   (edit for this machine)
+4. streamlit run app1.py
 
 
 Dummy name for Search mode - 1pps ;
