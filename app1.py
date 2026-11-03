@@ -874,24 +874,29 @@ def main_1() -> None:
             render_edit_observation(schedule)
 
 
+LOG_FILTER_KEYWORDS = [
+    "Waiting for",
+    "Observation",
+    "Pulsar:",
+    "ACQ over",
+    "Removing Trigger file from remote machine",
+    "Observation stoped",
+    "SLIP check",
+    "Pulsar data reduction pipeline started ...",
+    "---",
+    "All done!",
+]
+# Observation logs are fetched as <pulsar>_<dd_mm_yyyy>_observation.log
+OBSERVATION_LOG_PATTERN = re.compile(r"^(?P<pulsar>.+?)_\d{2}_\d{2}_\d{4}_observation\.log$")
+
+
 @st.fragment(run_every=get_fragment_refresh_seconds())
 def render_log_updates_tab() -> None:
     log_files = db.get_system_status("Log_Current") or []
     if isinstance(log_files, str):
         log_files = [log_files]
 
-    filter_keywords = [
-        "Waiting for",
-        "Observation",
-        "Pulsar:",
-        "ACQ over",
-        "Removing Trigger file from remote machine",
-        "Observation stoped",
-        "SLIP check",
-        "Pulsar data reduction pipeline started ...",
-        "---",
-        "All done!",
-    ]
+    filter_keywords = LOG_FILTER_KEYWORDS
 
     if not log_files:
         st.warning("No log files found in the current run.")
@@ -909,6 +914,88 @@ def render_log_updates_tab() -> None:
                 st.text("\n".join(reversed(filtered_lines)))
             else:
                 st.text("No matching logs yet.")
+
+
+@st.cache_data(show_spinner=False, ttl=30)
+def list_past_logs(log_dir: str) -> list[dict]:
+    """Every observation log in log_files/, newest observation first."""
+    records = []
+    for file_path in glob.glob(os.path.join(log_dir, "*observation*.log")):
+        file_name = os.path.basename(file_path)
+        match = OBSERVATION_LOG_PATTERN.match(file_name)
+        stem = os.path.splitext(file_name)[0]
+        pulsar = match.group("pulsar") if match else re.sub(r"_?observation$", "", stem).split("_")[0]
+        observation_date = parse_observation_date(os.path.splitext(file_name)[0])
+        try:
+            modified_ts = os.path.getmtime(file_path)
+        except OSError:
+            continue
+        records.append(
+            {
+                "pulsar": pulsar,
+                "file_name": file_name,
+                "path": file_path,
+                "observation_date": observation_date,
+                "observation_date_label": format_observation_date(observation_date),
+                "modified_ts": modified_ts,
+            }
+        )
+    records.sort(key=lambda record: (record["observation_date"] or dtt.date.min, record["modified_ts"]), reverse=True)
+    return records
+
+
+def render_past_logs() -> None:
+    st.divider()
+    st.subheader("Past observation logs")
+    past_logs = list_past_logs(LOG_DIR)
+    if not past_logs:
+        st.info("No observation logs in log_files/ yet.")
+        return
+
+    log_counts: dict[str, int] = {}
+    for record in past_logs:
+        log_counts[record["pulsar"]] = log_counts.get(record["pulsar"], 0) + 1
+    pulsar_col, date_col, view_col = st.columns([1.2, 1.2, 1])
+    with pulsar_col:
+        pulsar = st.selectbox(
+            f"Pulsar ({len(log_counts)} with logs)",
+            options=sorted(log_counts),
+            format_func=lambda name: f"{name}  ·  {log_counts[name]} log{'s' if log_counts[name] != 1 else ''}",
+            key="past_log_pulsar",
+        )
+    pulsar_logs = [record for record in past_logs if record["pulsar"] == pulsar]
+    logs_by_name = {record["file_name"]: record for record in pulsar_logs}
+    with date_col:
+        chosen_name = st.selectbox(
+            f"Observation date ({len(pulsar_logs)} available)",
+            options=list(logs_by_name),
+            format_func=lambda name: (
+                f"{logs_by_name[name]['observation_date_label']}  ·  "
+                f"saved {format_ist_timestamp(logs_by_name[name]['modified_ts'])}"
+            ),
+            key="past_log_file",
+        )
+    with view_col:
+        view_mode = st.radio(
+            "Show",
+            options=["Key lines", "Full log"],
+            horizontal=True,
+            key="past_log_view",
+        )
+
+    chosen = logs_by_name[chosen_name]
+    all_lines = read_all_lines(chosen["path"])
+    lines = all_lines if view_mode == "Full log" else filter_lines(all_lines, LOG_FILTER_KEYWORDS)
+    st.caption(f"`{chosen['file_name']}` · {len(lines)} of {len(all_lines)} lines")
+    with st.container(height=420):
+        st.text("\n".join(lines) if lines else "No matching lines in this log.")
+    st.download_button(
+        "Download this log",
+        data="\n".join(all_lines),
+        file_name=chosen["file_name"],
+        mime="text/plain",
+        key="past_log_download",
+    )
 
 
 def render_fits_download(record: dict, label: str, key_prefix: str) -> None:
@@ -1423,6 +1510,7 @@ def main() -> None:
 
     with tab1:
         render_log_updates_tab()
+        render_past_logs()
 
     with tab2:
         st.markdown("""
