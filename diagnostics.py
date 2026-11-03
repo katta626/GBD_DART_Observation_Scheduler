@@ -1,9 +1,11 @@
 """Diagnostic plots for the DIAGNOSTIC PLOTS tab, read directly from the PDR HDF5 files.
 
 Draws the four plots of the original scripts in live_PDR_plot.zip (pearson_CC,
-cc_tseries_phase, spectrogram, one_hr_plot) as interactive Plotly charts. The calculations
-deliberately follow those scripts line by line, including 10*log10(|x|^2) on values that
-are already powers and the real part of the complex Pearson ratio.
+cc_tseries_phase, spectrogram, one_hr_plot) as interactive Plotly charts.
+
+The auto- and cross-correlations are already powers: p_sum_avg = acorr1 + acorr2 + 2*Re(corr)
+to within 0.1% in the real data. So power in dB is 10*log10(|x|), not the original
+10*log10(|x|^2), and band-averaged correlated power is |mean(corr)|, not its square.
 """
 from __future__ import annotations
 
@@ -18,8 +20,6 @@ import pandas as pd
 MIN_VALID_FILE_BYTES = 1024
 # More columns than a screen has pixels only slows the browser; one hour is ~7000 spectra.
 MAX_SPECTROGRAM_COLUMNS = 720
-# The original plotted the first 50 spectra of a file and kept the last one drawn.
-ORIGINAL_SPECTRUM_INDEX = 49
 
 SPECTRUM_DATASETS = ("timestamp", "corr_spec_avg", "acorr_spec_avg1", "acorr_spec_avg2")
 WINDOW_DATASETS = ("timestamp", "corr_spec_avg", "p_sum_avg")
@@ -39,23 +39,15 @@ HEATMAP_SCALE = [[0.0, "#0d366b"], [0.25, "#1c5cab"], [0.5, "#3987e5"], [0.75, "
 
 @dataclass(frozen=True)
 class Band:
-    center_mhz: float = 200.0
-    bandwidth_mhz: float = 16.5
-    channel0_is_high: bool = False
+    center_mhz: float = 175.0
+    bandwidth_mhz: float = 16.0
+    channel0_is_high: bool = True
 
-    def _ordered(self, frequencies: np.ndarray) -> np.ndarray:
-        return 2 * self.center_mhz - frequencies if self.channel0_is_high else frequencies
-
-    def full_axis(self, channel_count: int) -> np.ndarray:
-        """freq_axis of the single-file script: linspace(freq-bw/2, freq+bw/2, nchan)."""
-        low = self.center_mhz - self.bandwidth_mhz / 2
-        return self._ordered(np.linspace(low, low + self.bandwidth_mhz, channel_count))
-
-    def slice_axis(self, channel_count: int, start: int, stop: int) -> np.ndarray:
-        """freq_axis of the combined-data script, for the channels start:stop."""
-        low = self.center_mhz - self.bandwidth_mhz / 2
-        bin_size = self.bandwidth_mhz / channel_count
-        return self._ordered(np.linspace(low + start * bin_size, low + stop * bin_size, stop - start))
+    def channel_frequencies(self, channel_count: int) -> np.ndarray:
+        """Centre frequency (MHz) of every channel, in channel order, as DAT_FREQ in the FITS files."""
+        width = self.bandwidth_mhz / channel_count
+        ascending = self.center_mhz - self.bandwidth_mhz / 2 + (np.arange(channel_count) + 0.5) * width
+        return ascending[::-1] if self.channel0_is_high else ascending
 
 
 # ------------------------------------------------------------------------------
@@ -124,18 +116,20 @@ def collect_window(
 
 
 # ------------------------------------------------------------------------------
-# The original formulas
+# Calculations
 # ------------------------------------------------------------------------------
 def power_db(values: np.ndarray) -> np.ndarray:
-    """10*log10(np.abs(x)**2), with a floor so an exact zero does not give -inf."""
-    return 10 * np.log10(np.maximum(np.abs(values) ** 2, np.finfo(float).tiny))
+    """10*log10(|x|) of a power, with a floor so an exact zero does not give -inf."""
+    return 10 * np.log10(np.maximum(np.abs(values), np.finfo(float).tiny))
 
 
-def pearson_real(corr: np.ndarray, acorr1: np.ndarray, acorr2: np.ndarray) -> np.ndarray:
-    """corr / sqrt(acorr1 * acorr2); plt.plot() of this complex array showed its real part."""
-    denominator = np.sqrt(acorr1 * acorr2)
-    ratio = np.divide(corr, denominator, out=np.full(corr.shape, np.nan + 0j), where=denominator != 0)
-    return ratio.real
+def pearson_magnitude(corr: np.ndarray, acorr1: np.ndarray, acorr2: np.ndarray) -> np.ndarray:
+    """|rho| = |corr| / sqrt(|acorr1| * |acorr2|), from 0 to 1.
+
+    The original plotted the complex ratio, and plt.plot() silently kept only its real part.
+    """
+    denominator = np.sqrt(np.abs(acorr1) * np.abs(acorr2))
+    return np.divide(np.abs(corr), denominator, out=np.full(denominator.shape, np.nan), where=denominator > 0)
 
 
 def phase_degrees(values: np.ndarray) -> np.ndarray:
@@ -149,7 +143,7 @@ def to_local_times(timestamps: np.ndarray, timezone: ZoneInfo) -> pd.DatetimeInd
 
 
 def spectrogram_grid(timestamps: np.ndarray, power: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """(column times, columns x channels). Real gaps stay blank; long spans are averaged."""
+    """(column times, columns x channels) of linear power. Gaps stay blank; long spans are averaged."""
     if timestamps.size < 2:
         return timestamps, power
 
@@ -215,10 +209,13 @@ def _dots(x, y, name: str, *, gl: bool = False, size: int = 5):
     return trace(x=x, y=y, name=name, mode="markers", marker={"color": SERIES_1, "size": size}, showlegend=False)
 
 
-def _add_spectrogram(figure, row: int, timestamps, power, frequencies, timezone: ZoneInfo) -> None:
+def _add_spectrogram(figure, row: int, timestamps, corr, frequencies, timezone: ZoneInfo) -> None:
     from plotly import graph_objects as go
 
-    column_times, grid = spectrogram_grid(timestamps, power)
+    # Average in linear power, then convert: averaging dB values would hide short bursts.
+    column_times, linear = spectrogram_grid(timestamps, np.abs(corr))
+    with np.errstate(invalid="ignore"):
+        grid = np.where(np.isfinite(linear), power_db(linear), np.nan)
     limits = np.nanpercentile(grid, [2, 98])
     axis_name = "yaxis" if row == 1 else f"yaxis{row}"
     domain = figure.layout[axis_name].domain
@@ -259,8 +256,8 @@ def _finish(figure, row: int, x_title: str, revision: str, time_format: str | No
 # ------------------------------------------------------------------------------
 # The four plots
 # ------------------------------------------------------------------------------
-def spectrum_figure(arrays: dict[str, np.ndarray], index: int, revision: str) -> dict:
-    """pearson_CC: Pearson_Corr_coeff.png. One spectrum against channel number."""
+def spectrum_figure(arrays: dict[str, np.ndarray], index: int, band: Band, revision: str) -> dict:
+    """pearson_CC: Pearson_Corr_coeff.png. One spectrum against channel number and frequency."""
     corr = arrays["corr_spec_avg"][index]
     acorr1 = arrays["acorr_spec_avg1"][index]
     acorr2 = arrays["acorr_spec_avg2"][index]
@@ -272,14 +269,21 @@ def spectrum_figure(arrays: dict[str, np.ndarray], index: int, revision: str) ->
     figure.add_trace(_line(channels, power_db(acorr2), "Auto-corr. 2"), row=2, col=1)
     _axis_title(figure, 2, "Auto-corr. 2 (dB)")
     figure.add_trace(_line(channels, power_db(corr), "Cross power"), row=3, col=1)
-    figure.update_yaxes(range=[20, 125], row=3, col=1)
     _axis_title(figure, 3, "Cross power (dB)")
-    figure.add_trace(_line(channels, pearson_real(corr, acorr1, acorr2), "Pearson corr."), row=4, col=1)
-    _axis_title(figure, 4, "Pearson corr.")
+    figure.add_trace(_line(channels, pearson_magnitude(corr, acorr1, acorr2), "Pearson |\u03c1|"), row=4, col=1)
+    figure.update_yaxes(rangemode="tozero", row=4, col=1)
+    _axis_title(figure, 4, "Pearson |\u03c1|")
     figure.add_trace(_dots(channels, phase_degrees(corr), "Phase"), row=5, col=1)
     figure.update_yaxes(range=[-180, 180], tickvals=[-180, -90, 0, 90, 180], row=5, col=1)
     _axis_title(figure, 5, "Phase (deg)")
-    return _finish(figure, 5, "Channel number", revision)
+    frequencies = band.channel_frequencies(corr.size)
+    tick_channels = np.arange(0, corr.size, 25)
+    figure.update_xaxes(
+        tickvals=tick_channels,
+        ticktext=[f"{channel}<br>{frequencies[channel]:.1f}" for channel in tick_channels],
+        range=[-1, corr.size],
+    )
+    return _finish(figure, 5, "Channel number (top) and frequency in MHz (bottom)", revision)
 
 
 def file_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, revision: str) -> dict:
@@ -294,7 +298,7 @@ def file_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, r
     figure.add_trace(_line(times, average.imag, "Imaginary", SERIES_2, legend=True), row=1, col=1)
     figure.update_layout(showlegend=True)
     _axis_title(figure, 1, "Cross-corr. (arb.)")
-    _add_spectrogram(figure, 2, timestamps, power_db(corr), band.full_axis(corr.shape[1]), timezone)
+    _add_spectrogram(figure, 2, timestamps, corr, band.channel_frequencies(corr.shape[1]), timezone)
     figure.add_trace(_line(times, phase_degrees(average), "Phase"), row=3, col=1)
     figure.add_hline(y=0, line={"color": TEXT_SECONDARY, "width": 1, "dash": "dash"}, row=3, col=1)
     _axis_title(figure, 3, "Phase (deg)")
@@ -305,7 +309,7 @@ def spectrogram_figure(arrays: dict[str, np.ndarray], band: Band, timezone: Zone
     """spectrogram: spectrogram.png. Time against frequency for one file."""
     corr = arrays["corr_spec_avg"]
     figure = _new_figure(1, 560)
-    _add_spectrogram(figure, 1, arrays["timestamp"], power_db(corr), band.full_axis(corr.shape[1]), timezone)
+    _add_spectrogram(figure, 1, arrays["timestamp"], corr, band.channel_frequencies(corr.shape[1]), timezone)
     return _finish(figure, 1, "Time (IST)", revision, "%H:%M:%S", to_local_times(arrays["timestamp"], timezone))
 
 
@@ -333,19 +337,14 @@ def window_figure(
         col=1,
     )
     _axis_title(figure, 1, "PA power (arb.)")
-    figure.add_trace(_line(times, np.abs(average) ** 2, "Corr. power", gl=True, width=1.2), row=2, col=1)
+    figure.add_trace(_line(times, np.abs(average), "Corr. power", gl=True, width=1.2), row=2, col=1)
     _axis_title(figure, 2, "Corr. power (arb.)")
     figure.add_trace(_line(times, average.real, "Real", gl=True, width=1.2, legend=True), row=3, col=1)
     figure.add_trace(_line(times, average.imag, "Imaginary", SERIES_2, gl=True, width=1.2, legend=True), row=3, col=1)
     figure.update_layout(showlegend=True)
     _axis_title(figure, 3, "Cross-corr. (arb.)")
     _add_spectrogram(
-        figure,
-        4,
-        timestamps,
-        power_db(corr_slice),
-        band.slice_axis(channel_count, start_channel, stop_channel),
-        timezone,
+        figure, 4, timestamps, corr_slice, band.channel_frequencies(channel_count)[start_channel:stop_channel], timezone
     )
     figure.add_trace(_dots(times, phase_degrees(average), "Phase", gl=True, size=3), row=5, col=1)
     figure.add_hline(y=0, line={"color": TEXT_SECONDARY, "width": 1, "dash": "dash"}, row=5, col=1)

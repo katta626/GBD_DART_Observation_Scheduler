@@ -46,10 +46,11 @@ remote_host = "vela@172.17.20.203"
 remote_dir = "/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43"
 
 [diagnostics]
-center_frequency_mhz = 200.0
-bandwidth_mhz = 16.5
-# Set to true if channel 0 is the high-frequency end of the band.
-channel0_is_high = false
+center_frequency_mhz = 175.0
+bandwidth_mhz = 16.0
+# Channel 0 is the high-frequency end: the FITS files give 183.2 down to 166.8 MHz, their band
+# shape matches the HDF5 channel order, and J0953+0755 only dedisperses with this order.
+channel0_is_high = true
 # Channel slice used by the "Last hour" plot.
 hour_channel_start = 50
 hour_channel_stop = 200

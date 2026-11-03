@@ -1117,9 +1117,9 @@ def get_newest_readable_file(files: list[Path]) -> Path | None:
 
 
 @st.cache_data(show_spinner=False, max_entries=32)
-def spectrum_chart(file_path: str, modified_ts: float, index: int) -> dict:
+def spectrum_chart(file_path: str, modified_ts: float, index: int, band: diagnostics.Band) -> dict:
     arrays = load_spectra(file_path, modified_ts)
-    return diagnostics.spectrum_figure(arrays, index, f"{file_path}:{index}")
+    return diagnostics.spectrum_figure(arrays, index, band, f"{file_path}:{index}")
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -1248,7 +1248,7 @@ def render_live_diagnostic_plots() -> None:
         )
         with spectrum_tab:
             spectrum_count = arrays["corr_spec_avg"].shape[0]
-            shown = min(diagnostics.ORIGINAL_SPECTRUM_INDEX + 1, spectrum_count)
+            shown = spectrum_count
             if spectrum_count > 1:
                 shown = st.slider(
                     "Spectrum in this file",
@@ -1260,7 +1260,7 @@ def render_live_diagnostic_plots() -> None:
             spectrum_time = format_ist_timestamp(float(arrays["timestamp"][shown - 1]))
             st.caption(f"Spectrum {shown} of {spectrum_count} · {spectrum_time}")
             st.plotly_chart(
-                spectrum_chart(str(selected), selected_ts, shown - 1),
+                spectrum_chart(str(selected), selected_ts, shown - 1, band),
                 width="stretch", config=chart_options, key="diagnostic_spectrum_chart",
             )
         with file_tab:

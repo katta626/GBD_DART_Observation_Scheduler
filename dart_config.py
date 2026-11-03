@@ -64,9 +64,9 @@ _DEFAULT_CONFIG = {
         "remote_dir": "/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43",
     },
     "diagnostics": {
-        "center_frequency_mhz": 200.0,
-        "bandwidth_mhz": 16.5,
-        "channel0_is_high": False,
+        "center_frequency_mhz": 175.0,
+        "bandwidth_mhz": 16.0,
+        "channel0_is_high": True,
         "hour_channel_start": 50,
         "hour_channel_stop": 200,
         "phase_calibration_file": "",
