@@ -142,10 +142,13 @@ class DataStore:
         conn.close()
 
     def get_system_status(self, key):
-        with self.connect() as conn:
+        conn = self._get_conn()
+        try:
             cur = conn.cursor()
             cur.execute("SELECT value FROM system_status WHERE key=?", (key,))
             result = cur.fetchone()
+        finally:
+            conn.close()
 
         if not result:
             return None
@@ -169,7 +172,8 @@ class DataStore:
             # Special case for Log_Current dicts
             value = ",".join(value["current_file"])
 
-        with self.connect() as conn:
+        conn = self._get_conn()
+        try:
             cur = conn.cursor()
             cur.execute("""
                 INSERT INTO system_status (key, value)
@@ -177,3 +181,5 @@ class DataStore:
                 ON CONFLICT(key) DO UPDATE SET value=excluded.value
             """, (key, value))
             conn.commit()
+        finally:
+            conn.close()

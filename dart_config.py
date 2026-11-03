@@ -2,9 +2,12 @@ from __future__ import annotations
 
 """DART runtime configuration loader.
 
-Edit `dart_settings.toml` for normal IP, port, path, and UI refresh changes.
-The values in `_DEFAULT_CONFIG` are fallback defaults used only when the TOML
-file is missing or when a specific key is not present there.
+Edit `dart_settings.toml` for shared defaults. Machine-specific values (the real
+API IP on the production system, a slower refresh, ...) go in
+`dart_settings.local.toml`, which is git-ignored and overrides the shared file,
+so deploying a new version from `main` never overwrites production settings.
+The values in `_DEFAULT_CONFIG` are fallback defaults used only when a key is
+present in neither TOML file.
 """
 
 from copy import deepcopy
@@ -15,6 +18,7 @@ from zoneinfo import ZoneInfo
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = PROJECT_ROOT / "dart_settings.toml"
+LOCAL_CONFIG_PATH = PROJECT_ROOT / "dart_settings.local.toml"
 
 _DEFAULT_CONFIG = {
     "paths": {
@@ -44,6 +48,7 @@ _DEFAULT_CONFIG = {
         "page_icon": "☩",
         "quick_observation_name": "1pps",
         "quick_add_countdown_seconds": 2,
+        "enable_diagnostics": True,
     },
     "scheduler": {
         "threshold_seconds": 10,
@@ -53,6 +58,10 @@ _DEFAULT_CONFIG = {
     },
     "observation": {
         "script": "",
+    },
+    "hdf5_sync": {
+        "remote_host": "vela@172.17.20.203",
+        "remote_dir": "/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43",
     },
 }
 
@@ -68,13 +77,23 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 
 def _load_raw_config() -> dict:
-    if not CONFIG_PATH.exists():
-        return deepcopy(_DEFAULT_CONFIG)
+    merged = deepcopy(_DEFAULT_CONFIG)
+    for path in (CONFIG_PATH, LOCAL_CONFIG_PATH):
+        if path.exists():
+            with open(path, "rb") as config_file:
+                merged = _deep_merge(merged, tomllib.load(config_file))
+    return merged
 
-    with open(CONFIG_PATH, "rb") as config_file:
-        user_config = tomllib.load(config_file)
 
-    return _deep_merge(_DEFAULT_CONFIG, user_config)
+def get_config_mtime() -> tuple[float | None, float | None]:
+    """Modification times of both settings files, used to detect live edits."""
+    mtimes = []
+    for path in (CONFIG_PATH, LOCAL_CONFIG_PATH):
+        try:
+            mtimes.append(path.stat().st_mtime if path.exists() else None)
+        except OSError:
+            mtimes.append(None)
+    return tuple(mtimes)
 
 
 def _resolve_path(path_value: str) -> str:
@@ -124,6 +143,7 @@ def get_runtime_settings() -> dict:
             "page_icon": str(raw_config["ui"]["page_icon"]),
             "quick_observation_name": str(raw_config["ui"]["quick_observation_name"]),
             "quick_add_countdown_seconds": int(raw_config["ui"]["quick_add_countdown_seconds"]),
+            "enable_diagnostics": bool(raw_config["ui"]["enable_diagnostics"]),
         },
         "scheduler": {
             "threshold_seconds": float(raw_config["scheduler"]["threshold_seconds"]),
@@ -133,6 +153,10 @@ def get_runtime_settings() -> dict:
         },
         "observation": {
             "script": str(raw_config["observation"]["script"]).strip(),
+        },
+        "hdf5_sync": {
+            "remote_host": str(raw_config["hdf5_sync"]["remote_host"]),
+            "remote_dir": str(raw_config["hdf5_sync"]["remote_dir"]),
         },
     }
 

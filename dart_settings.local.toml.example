@@ -1,0 +1,14 @@
+# Copy to dart_settings.local.toml on each machine (that file is git-ignored).
+# Any key from dart_settings.toml can be overridden here.
+# These are the values the production system currently runs with.
+
+[network]
+api_host = "172.17.20.210"
+
+[ui]
+refresh_interval_ms = 5000
+# Set to false to hide the DIAGNOSTIC PLOTS tab ("Under Construction").
+enable_diagnostics = false
+
+# [hdf5_sync]
+# remote_dir = "/media/vela/GBD_HDF5ARCHIVE/<current_observation_dir>"
