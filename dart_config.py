@@ -63,6 +63,14 @@ _DEFAULT_CONFIG = {
         "remote_host": "vela@172.17.20.203",
         "remote_dir": "/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43",
     },
+    "diagnostics": {
+        "center_frequency_mhz": 200.0,
+        "bandwidth_mhz": 16.5,
+        "channel0_is_high": False,
+        "hour_channel_start": 50,
+        "hour_channel_stop": 200,
+        "phase_calibration_file": "",
+    },
 }
 
 
@@ -157,6 +165,14 @@ def get_runtime_settings() -> dict:
         "hdf5_sync": {
             "remote_host": str(raw_config["hdf5_sync"]["remote_host"]),
             "remote_dir": str(raw_config["hdf5_sync"]["remote_dir"]),
+        },
+        "diagnostics": {
+            "center_frequency_mhz": float(raw_config["diagnostics"]["center_frequency_mhz"]),
+            "bandwidth_mhz": float(raw_config["diagnostics"]["bandwidth_mhz"]),
+            "channel0_is_high": bool(raw_config["diagnostics"]["channel0_is_high"]),
+            "hour_channel_start": int(raw_config["diagnostics"]["hour_channel_start"]),
+            "hour_channel_stop": int(raw_config["diagnostics"]["hour_channel_stop"]),
+            "phase_calibration_file": str(raw_config["diagnostics"]["phase_calibration_file"]).strip(),
         },
     }
 

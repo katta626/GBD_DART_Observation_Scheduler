@@ -44,3 +44,14 @@ script = ""
 [hdf5_sync]
 remote_host = "vela@172.17.20.203"
 remote_dir = "/media/vela/GBD_HDF5ARCHIVE/23_07_2026_17_43"
+
+[diagnostics]
+center_frequency_mhz = 200.0
+bandwidth_mhz = 16.5
+# Set to true if channel 0 is the high-frequency end of the band.
+channel0_is_high = false
+# Channel slice used by the "Last hour" plot.
+hour_channel_start = 50
+hour_channel_stop = 200
+# Path to rf_path_phase.dat. Empty: look for it next to the live HDF5 data.
+phase_calibration_file = ""

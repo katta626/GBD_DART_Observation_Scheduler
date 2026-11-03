@@ -22,6 +22,12 @@ try:
 except ModuleNotFoundError:
     h5py = None
 
+try:
+    import matplotlib  # noqa: F401
+    import diagnostics
+except ModuleNotFoundError:
+    diagnostics = None
+
 from datastore import DataStore
 from dart_config import (
     APP_TIMEZONE,
@@ -1075,271 +1081,157 @@ def render_diagnostic_tab() -> None:
 TRANSIENT_HDF5_DIR = Path(PROJECT_ROOT) / "transient_hdf5"
 LIVE_HDF5_DIR = TRANSIENT_HDF5_DIR / "temp_data" / "transient_hdf5_data"
 PHASE_CALIBRATION_FILE = "rf_path_phase.dat"
+DIAGNOSTIC_FILE_CHOICES = 30
+LATEST_FILE_CHOICE = "Latest file (live)"
 
 
-def hdf5_power_db(values: np.ndarray) -> np.ndarray:
-    """The exact power conversion used by the original HDF5 plotting scripts."""
-    return 10 * np.log10(np.maximum(np.abs(values) ** 2, np.finfo(float).tiny))
-
-
-def get_live_hdf5_files() -> list[Path]:
-    """Find the files synced beside this project, without machine-specific paths."""
-    files_with_mtime = []
-    for file_path in LIVE_HDF5_DIR.glob("*.hdf5"):
-        try:
-            files_with_mtime.append((file_path.stat().st_mtime, file_path))
-        except OSError:
-            # The sync process may prune an old file while this fragment refreshes.
-            continue
-    return [file_path for _, file_path in sorted(files_with_mtime)]
-
-
-def load_hdf5_arrays(file_path: Path, dataset_names: tuple[str, ...]) -> dict[str, np.ndarray]:
-    """Read precisely the arrays consumed by the original plotting code."""
-    with h5py.File(file_path, "r", locking=False) as hdf5_file:
-        missing = [name for name in dataset_names if name not in hdf5_file]
-        if missing:
-            raise KeyError(", ".join(missing))
-        return {name: np.asarray(hdf5_file[name][:]) for name in dataset_names}
-
-
-def get_phase_calibration_path() -> Path | None:
-    """Locate a calibration file relative to the live data, when supplied."""
-    candidates = (
-        LIVE_HDF5_DIR / PHASE_CALIBRATION_FILE,
-        LIVE_HDF5_DIR.parent / PHASE_CALIBRATION_FILE,
-        TRANSIENT_HDF5_DIR / PHASE_CALIBRATION_FILE,
-    )
+def get_phase_calibration_path(configured_path: str) -> Path | None:
+    """The configured calibration file, or one placed beside the live data."""
+    if configured_path:
+        candidates = (Path(configured_path),)
+    else:
+        candidates = (
+            LIVE_HDF5_DIR / PHASE_CALIBRATION_FILE,
+            LIVE_HDF5_DIR.parent / PHASE_CALIBRATION_FILE,
+            TRANSIENT_HDF5_DIR / PHASE_CALIBRATION_FILE,
+        )
     return next((path for path in candidates if path.is_file()), None)
 
 
-def collect_last_hour_hdf5_data(
-    hdf5_files: list[Path], end_timestamp: float
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Replace the old combined-HDF5 intermediate file with in-memory data."""
-    cutoff = end_timestamp - 3600
-    timestamp_parts: list[np.ndarray] = []
-    correlation_parts: list[np.ndarray] = []
-    pa_power_parts: list[np.ndarray] = []
+# Plots are cached as finished images. The file's modification time is part of each cache
+# key, so a figure is drawn once per file; page refreshes in between cost almost nothing.
+@st.cache_data(show_spinner=False, max_entries=64)
+def load_spectra(file_path: str, modified_ts: float) -> dict[str, np.ndarray]:
+    return diagnostics.load_arrays(Path(file_path), diagnostics.SPECTRUM_DATASETS)
 
-    for file_path in reversed(hdf5_files):
+
+def get_newest_readable_file(files: list[Path]) -> Path | None:
+    for file_path in reversed(files):
         try:
-            arrays = load_hdf5_arrays(file_path, ("timestamp", "corr_spec_avg", "p_sum_avg"))
-        except (OSError, ValueError, KeyError):
-            # Skip a file while the acquisition program is still writing it.
+            load_spectra(str(file_path), file_path.stat().st_mtime)
+            return file_path
+        except diagnostics.UNREADABLE_FILE_ERRORS:
+            # Corrupt, or still being written by the acquisition program.
             continue
-
-        file_timestamps = arrays["timestamp"]
-        selected = file_timestamps >= cutoff
-        if not np.any(selected):
-            if file_timestamps.size and file_timestamps.max() < cutoff:
-                break
-            continue
-
-        timestamp_parts.append(file_timestamps[selected])
-        correlation_parts.append(arrays["corr_spec_avg"][selected])
-        pa_power_parts.append(arrays["p_sum_avg"][selected])
-
-    if not timestamp_parts:
-        return np.array([]), np.array([]), np.array([])
-
-    timestamps = np.concatenate(timestamp_parts)
-    correlation = np.concatenate(correlation_parts)
-    pa_power = np.concatenate(pa_power_parts)
-    order = np.argsort(timestamps)
-    return timestamps[order], correlation[order], pa_power[order]
+    return None
 
 
-def render_spectrogram(times: pd.DatetimeIndex, power: np.ndarray, frequency_axis: np.ndarray) -> None:
-    """Render the original imshow(power.T) as a native Streamlit Vega chart."""
-    spectrogram_data = pd.DataFrame(
-        {
-            "time": np.repeat(times.tz_localize(None), power.shape[1]),
-            "frequency_mhz": np.tile(frequency_axis, power.shape[0]),
-            "power_db": power.reshape(-1),
-        }
+@st.cache_data(show_spinner=False, max_entries=32)
+def spectrum_png(file_path: str, modified_ts: float, index: int, band: diagnostics.Band) -> bytes:
+    arrays = load_spectra(file_path, modified_ts)
+    return diagnostics.plot_spectrum(arrays, index, band, APP_TIMEZONE, Path(file_path).name)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def file_summary_png(file_path: str, modified_ts: float, band: diagnostics.Band) -> bytes:
+    arrays = load_spectra(file_path, modified_ts)
+    return diagnostics.plot_file_summary(arrays, band, APP_TIMEZONE, Path(file_path).name)
+
+
+@st.cache_data(show_spinner=False, max_entries=8)
+def spectrogram_png(file_path: str, modified_ts: float, band: diagnostics.Band) -> bytes:
+    arrays = load_spectra(file_path, modified_ts)
+    return diagnostics.plot_spectrogram(arrays, band, APP_TIMEZONE, Path(file_path).name)
+
+
+@st.cache_data(show_spinner=False, max_entries=4)
+def last_hour_png(
+    file_paths: tuple[str, ...],
+    end_timestamp: float,
+    band: diagnostics.Band,
+    channel_range: tuple[int, int],
+    calibration_path: str | None,
+) -> tuple[bytes | None, str]:
+    """(image, note): the note says whether the phase calibration was applied."""
+    timestamps, corr, pa_power = diagnostics.collect_window(
+        [Path(path) for path in file_paths], end_timestamp, 3600
     )
-    st.vega_lite_chart(
-        spectrogram_data,
-        {
-            "mark": "rect",
-            "encoding": {
-                "x": {"field": "time", "type": "temporal", "title": "Time"},
-                "y": {"field": "frequency_mhz", "type": "quantitative", "title": "Frequency (MHz)"},
-                "color": {"field": "power_db", "type": "quantitative", "title": "Power (dB)"},
-                "tooltip": ["time", "frequency_mhz", "power_db"],
-            },
-        },
-        height=360,
-        width="stretch",
-    )
-
-
-def render_pearson_phase_plot(
-    arrays: dict[str, np.ndarray], times: pd.DatetimeIndex
-) -> None:
-    """Recreate the five panels of Pearson_Corr_coeff.png from HDF5 arrays."""
-    corr = arrays["corr_spec_avg"]
-    acorr1 = arrays["acorr_spec_avg1"]
-    acorr2 = arrays["acorr_spec_avg2"]
-    # The legacy loop saves after every index, so its final PNG contains index 49.
-    sample_index = min(49, corr.shape[0] - 1)
-    channels = np.arange(corr.shape[1])
-    denominator = np.sqrt(acorr1[sample_index] * acorr2[sample_index])
-    pearson = np.divide(
-        corr[sample_index],
-        denominator,
-        out=np.full(corr.shape[1], np.nan + 0j),
-        where=denominator != 0,
-    )
-
-    st.caption(f"Spectrum {sample_index + 1} of {corr.shape[0]} · {times[sample_index]}")
-    left, right = st.columns(2)
-    with left:
-        st.caption("Auto-correlation 1 power")
-        st.line_chart(pd.DataFrame({"Power (dB)": hdf5_power_db(acorr1[sample_index])}, index=channels), height=220)
-        st.caption("Cross-correlation power")
-        st.line_chart(pd.DataFrame({"Power (dB)": hdf5_power_db(corr[sample_index])}, index=channels), height=220)
-        st.caption("Phase")
-        st.line_chart(pd.DataFrame({"Phase (degrees)": np.rad2deg(np.angle(corr[sample_index]))}, index=channels), height=220)
-    with right:
-        st.caption("Auto-correlation 2 power")
-        st.line_chart(pd.DataFrame({"Power (dB)": hdf5_power_db(acorr2[sample_index])}, index=channels), height=220)
-        st.caption("Pearson correlation")
-        # Matplotlib's former plt.plot(complex_array) displayed the real component.
-        st.line_chart(pd.DataFrame({"Pearson correlation": pearson.real}, index=channels), height=220)
-
-
-def render_cross_correlation_plots(arrays: dict[str, np.ndarray], times: pd.DatetimeIndex) -> None:
-    """Recreate cc_tseries_phase.png using the original variables and transforms."""
-    corr = arrays["corr_spec_avg"]
-    corr_channel_average = np.mean(corr, axis=1)
-    phase = np.rad2deg(np.angle(corr_channel_average))
-    frequency_axis = np.linspace(200 - 16.5 / 2, 200 + 16.5 / 2, corr.shape[1])
-
-    st.caption("Real and imaginary channel-averaged cross-correlation")
-    st.line_chart(
-        pd.DataFrame(
-            {"Re": corr_channel_average.real, "Im": corr_channel_average.imag}, index=times
-        ),
-        height=250,
-    )
-    st.caption("Cross-correlation spectrogram")
-    render_spectrogram(times, hdf5_power_db(corr), frequency_axis)
-    st.caption("Channel-averaged phase")
-    st.line_chart(
-        pd.DataFrame({"Phase (degrees)": phase, "Zero reference": np.zeros_like(phase)}, index=times),
-        height=250,
-    )
-
-
-def render_one_hour_plot(hdf5_files: list[Path], end_timestamp: float) -> None:
-    """Recreate one_hr_plot.png without creating a combined HDF5 file or PNG."""
-    timestamps, corr, p_sum = collect_last_hour_hdf5_data(hdf5_files, end_timestamp)
     if not timestamps.size:
-        st.info("No readable samples from the latest hour are available yet.")
-        return
+        return None, "No readable samples in the last hour."
 
-    calibration_path = get_phase_calibration_path()
-    if calibration_path is not None:
+    note = "phase uncalibrated"
+    if calibration_path:
         try:
-            phase_input = np.loadtxt(calibration_path, dtype=float, delimiter=",")
-            if phase_input.size != corr.shape[1]:
-                raise ValueError(f"expected {corr.shape[1]} channels, found {phase_input.size}")
-            corr = corr * (1j ** (phase_input / 90))
-            st.caption(f"Phase calibration: `{calibration_path.name}`")
+            corr = corr * diagnostics.load_phase_rotation(Path(calibration_path), corr.shape[1])
+            note = f"phase calibrated ({Path(calibration_path).name})"
         except (OSError, ValueError) as exc:
-            st.warning(f"Phase calibration was not applied: {exc}")
-    else:
-        st.caption("Phase calibration file not found; showing uncalibrated correlation data.")
-
-    start_channel = min(50, corr.shape[1])
-    stop_channel = min(200, corr.shape[1])
-    if start_channel == stop_channel:
-        st.info("The data does not contain the original channel range 50:200.")
-        return
-
-    corr_selected = corr[:, start_channel:stop_channel]
-    pa_selected = p_sum[:, start_channel:stop_channel]
-    corr_channel_average = np.mean(corr_selected, axis=1)
-    pa_channel_average = np.mean(pa_selected, axis=1)
-    phase = np.rad2deg(np.angle(corr_channel_average))
-    power = hdf5_power_db(corr_selected)
-    times = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(APP_TIMEZONE)
-    frequency_axis = np.linspace(
-        (200 - 16.5 / 2) + start_channel * (16.5 / corr.shape[1]),
-        (200 - 16.5 / 2) + stop_channel * (16.5 / corr.shape[1]),
-        stop_channel - start_channel,
+            note = f"phase uncalibrated: {exc}"
+    image = diagnostics.plot_window(
+        timestamps, corr, pa_power, band, channel_range, APP_TIMEZONE, calibration_note=note
     )
-
-    first_column, second_column = st.columns(2)
-    with first_column:
-        st.caption("PA power")
-        st.line_chart(pd.DataFrame({"PA power": pa_channel_average}, index=times), height=220)
-        st.caption("Real and imaginary cross-correlation")
-        st.line_chart(
-            pd.DataFrame({"Re1": corr_channel_average.real, "Im1": corr_channel_average.imag}, index=times),
-            height=220,
-        )
-    with second_column:
-        st.caption("Cross-correlation power")
-        st.line_chart(
-            pd.DataFrame({"Correlation power": np.abs(corr_channel_average) ** 2}, index=times),
-            height=220,
-        )
-        st.caption("Phase")
-        st.line_chart(
-            pd.DataFrame({"Phase (degrees)": phase, "Zero reference": np.zeros_like(phase)}, index=times),
-            height=220,
-        )
-    st.caption("Frequency-sliced spectrogram (channels 50:200)")
-    render_spectrogram(times, power, frequency_axis)
+    return image, note
 
 
 @st.fragment(run_every=get_fragment_refresh_seconds())
 def render_live_diagnostic_plots() -> None:
-    """Direct HDF5 dashboard; no PNG plots or second Streamlit application."""
-    if h5py is None:
-        st.error("HDF5 support is not installed. Install the project's `h5py` dependency and restart DART.")
+    """HDF5 plots drawn on the server; no PNG files or second Streamlit application."""
+    if h5py is None or diagnostics is None:
+        st.error("Install the project's `h5py` and `matplotlib` dependencies and restart DART.")
         return
 
-    hdf5_files = get_live_hdf5_files()
-    if not hdf5_files:
-        st.info(f"Waiting for live HDF5 files in `{LIVE_HDF5_DIR}`")
+    files, skipped_empty = diagnostics.list_candidate_files(LIVE_HDF5_DIR)
+    newest = get_newest_readable_file(files)
+    if newest is None:
+        st.info(f"Waiting for readable HDF5 files in `{LIVE_HDF5_DIR}`")
         return
 
-    latest_file = hdf5_files[-1]
-    try:
-        arrays = load_hdf5_arrays(
-            latest_file,
-            ("corr_spec_avg", "acorr_spec_avg1", "acorr_spec_avg2", "timestamp"),
-        )
-    except (OSError, ValueError, KeyError) as exc:
-        st.warning(f"Unable to read the latest live HDF5 file: {exc}")
-        return
-
-    timestamps = arrays["timestamp"]
-    corr = arrays["corr_spec_avg"]
-    if not timestamps.size or corr.ndim != 2:
-        st.info("The latest HDF5 file does not yet contain spectra.")
-        return
-
-    times = pd.to_datetime(timestamps, unit="s", utc=True).tz_convert(APP_TIMEZONE)
-    st.subheader("Live HDF5 diagnostic plots")
-    st.caption(f"Local source: `{latest_file}` · {len(hdf5_files)} synced files available")
-
-    pearson_tab, cross_tab, spectrogram_tab, hour_tab = st.tabs(
-        ["Pearson / phase", "Cross-correlation", "Spectrogram", "Last hour"]
+    settings = get_runtime_settings()["diagnostics"]
+    band = diagnostics.Band(
+        settings["center_frequency_mhz"], settings["bandwidth_mhz"], settings["channel0_is_high"]
     )
-    with pearson_tab:
-        render_pearson_phase_plot(arrays, times)
-    with cross_tab:
-        render_cross_correlation_plots(arrays, times)
+
+    st.subheader("Live HDF5 diagnostic plots")
+    recent_files = [path.name for path in reversed(files[-DIAGNOSTIC_FILE_CHOICES:])]
+    choice = st.selectbox(
+        "HDF5 file",
+        options=[LATEST_FILE_CHOICE] + recent_files,
+        key="diagnostic_file_choice",
+    )
+    selected = newest if choice == LATEST_FILE_CHOICE else LIVE_HDF5_DIR / choice
+    try:
+        selected_ts = selected.stat().st_mtime
+        arrays = load_spectra(str(selected), selected_ts)
+    except diagnostics.UNREADABLE_FILE_ERRORS as exc:
+        st.warning(f"Could not read `{selected.name}`: {exc}. Choose another file.")
+        return
+
+    skipped_note = f" · {skipped_empty} empty files ignored" if skipped_empty else ""
+    st.caption(f"Showing `{selected.name}` · {len(files)} files available{skipped_note}")
+
+    spectrum_tab, file_tab, spectrogram_tab, hour_tab = st.tabs(
+        ["Spectrum / Pearson", "This file", "Spectrogram", "Last hour"]
+    )
+    with spectrum_tab:
+        spectrum_count = arrays["corr_spec_avg"].shape[0]
+        index = spectrum_count
+        if spectrum_count > 1:
+            index = st.slider(
+                "Spectrum in this file",
+                min_value=1,
+                max_value=spectrum_count,
+                value=spectrum_count,
+                key=f"diagnostic_spectrum_{selected.name}",
+            )
+        st.image(spectrum_png(str(selected), selected_ts, index - 1, band), width="stretch")
+    with file_tab:
+        st.image(file_summary_png(str(selected), selected_ts, band), width="stretch")
     with spectrogram_tab:
-        frequency_axis = np.linspace(200 - 16.5 / 2, 200 + 16.5 / 2, corr.shape[1])
-        render_spectrogram(times, hdf5_power_db(corr), frequency_axis)
+        st.image(spectrogram_png(str(selected), selected_ts, band), width="stretch")
     with hour_tab:
-        render_one_hour_plot(hdf5_files, float(timestamps[-1]))
+        calibration_path = get_phase_calibration_path(settings["phase_calibration_file"])
+        with st.spinner("Collecting the last hour of files..."):
+            image, note = last_hour_png(
+                tuple(str(path) for path in files),
+                float(arrays["timestamp"][-1]),
+                band,
+                (settings["hour_channel_start"], settings["hour_channel_stop"]),
+                str(calibration_path) if calibration_path else None,
+            )
+        if image is None:
+            st.info(note)
+        else:
+            st.image(image, width="stretch")
+            st.caption(f"Hour ending at the selected file · {note}")
 
 
 def main() -> None:
