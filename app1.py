@@ -253,13 +253,36 @@ def format_file_size(size_bytes: int) -> str:
     return f"{size_bytes} B"
 
 
-def parse_observation_date(file_name: str) -> str:
-    match = re.search(r"(\d{2})_(\d{2})_(\d{4})", file_name)
-    if match is None:
-        return "Unknown"
+# Observation files are named like J0534+2200_60973_26_10_2025_profile.fits,
+# 1pps_61140_10_04_26_profile.png (two-digit year) or
+# 1pps_61139.63_175MHz_..._Tscrunchd.fits (MJD only).
+FILE_DATE_PATTERN = re.compile(r"_(\d{2})_(\d{2})_(\d{4}|\d{2})(?=[_.])")
+FILE_MJD_PATTERN = re.compile(r"_(\d{5})(?:\.\d+)?_")
+MJD_EPOCH = dtt.date(1858, 11, 17)
+UNKNOWN_DATE_LABEL = "Unknown"
 
-    day, month, year = match.groups()
-    return f"{day}-{month}-{year}"
+
+def parse_observation_date(file_name: str) -> dtt.date | None:
+    """Observation date from dd_mm_yyyy / dd_mm_yy in the file name, else from its MJD."""
+    match = FILE_DATE_PATTERN.search(file_name)
+    if match is not None:
+        day, month, year = (int(value) for value in match.groups())
+        if year < 100:
+            year += 2000
+        try:
+            return dtt.date(year, month, day)
+        except ValueError:
+            pass
+
+    # MJD 58849 = 2020-01-01; smaller values (e.g. 40587, the Unix epoch) are broken timestamps.
+    match = FILE_MJD_PATTERN.search(file_name)
+    if match is not None and 58849 <= int(match.group(1)) <= 80000:
+        return MJD_EPOCH + dtt.timedelta(days=int(match.group(1)))
+    return None
+
+
+def format_observation_date(observation_date: dtt.date | None) -> str:
+    return observation_date.strftime("%d-%m-%Y") if observation_date else UNKNOWN_DATE_LABEL
 
 
 def build_widget_key(prefix: str, value: str) -> str:
@@ -321,34 +344,52 @@ def inject_custom_styles() -> None:
     )
 
 
+def archive_sort_key(record: dict) -> tuple:
+    return (record["observation_date"] or dtt.date.min, record["created_ts"])
+
+
 @st.cache_data(show_spinner=False, ttl=10)
 def build_archive_records(base_dir: str) -> list[dict]:
-    records = []
+    """One record per observation: a FITS file and/or its preview PNG with the same name."""
     if not os.path.exists(base_dir):
-        return records
+        return []
 
+    observations: dict[tuple[str, str], dict] = {}
     pulsar_dirs = [name for name in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, name))]
-    for pulsar in sorted(pulsar_dirs):
-        pulsar_dir = os.path.join(base_dir, pulsar)
-        for fits_path in glob.glob(os.path.join(pulsar_dir, "*.fits")):
-            preview_path = fits_path.replace(".fits", ".png")
-            created_ts = os.path.getctime(fits_path)
-            file_name = os.path.basename(fits_path)
-            records.append(
-                {
-                    "pulsar": pulsar,
-                    "fits_path": fits_path,
-                    "file_name": file_name,
-                    "observation_date": parse_observation_date(file_name),
-                    "preview_path": preview_path if os.path.exists(preview_path) else None,
-                    "created_ts": created_ts,
-                    "created_at": format_ist_timestamp(created_ts),
-                    "file_size_bytes": os.path.getsize(fits_path),
-                    "file_size": format_file_size(os.path.getsize(fits_path)),
-                }
-            )
+    search_dirs = [(None, base_dir)] + [(pulsar, os.path.join(base_dir, pulsar)) for pulsar in pulsar_dirs]
+    for pulsar, directory in search_dirs:
+        for file_path in glob.glob(os.path.join(directory, "*.fits")) + glob.glob(os.path.join(directory, "*.png")):
+            stem, extension = os.path.splitext(os.path.basename(file_path))
+            # Loose files in the top folder are named <pulsar>_<mjd>_...
+            record_pulsar = pulsar or stem.split("_")[0]
+            entry = observations.setdefault((record_pulsar, stem), {"fits_path": None, "preview_path": None})
+            entry["fits_path" if extension == ".fits" else "preview_path"] = file_path
 
-    records.sort(key=lambda record: record["created_ts"], reverse=True)
+    records = []
+    for (pulsar, stem), entry in observations.items():
+        main_path = entry["fits_path"] or entry["preview_path"]
+        try:
+            created_ts = os.path.getmtime(main_path)
+            fits_size = os.path.getsize(entry["fits_path"]) if entry["fits_path"] else 0
+        except OSError:
+            continue
+        observation_date = parse_observation_date(stem)
+        records.append(
+            {
+                "pulsar": pulsar,
+                "fits_path": entry["fits_path"],
+                "file_name": os.path.basename(main_path),
+                "observation_date": observation_date,
+                "observation_date_label": format_observation_date(observation_date),
+                "preview_path": entry["preview_path"],
+                "created_ts": created_ts,
+                "created_at": format_ist_timestamp(created_ts),
+                "file_size_bytes": fits_size,
+                "file_size": format_file_size(fits_size) if entry["fits_path"] else "—",
+            }
+        )
+
+    records.sort(key=archive_sort_key, reverse=True)
     return records
 
 
@@ -795,13 +836,51 @@ def render_log_updates_tab() -> None:
                 st.text("No matching logs yet.")
 
 
+def render_fits_download(record: dict, label: str, key_prefix: str) -> None:
+    if record["fits_path"] is None:
+        st.caption("FITS file not available for this observation.")
+        return
+    st.download_button(
+        label,
+        data=load_binary_file(record["fits_path"]),
+        file_name=os.path.basename(record["fits_path"]),
+        mime="application/fits",
+        key=build_widget_key(key_prefix, record["fits_path"]),
+        width='stretch',
+    )
+
+
+def build_date_overview(archive_records: list[dict]) -> pd.DataFrame:
+    """Per pulsar: how many observations and on which dates (newest first)."""
+    dates_by_pulsar: dict[str, dict[str, int]] = {}
+    for record in sorted(archive_records, key=archive_sort_key, reverse=True):
+        pulsar_dates = dates_by_pulsar.setdefault(record["pulsar"], {})
+        label = record["observation_date_label"]
+        pulsar_dates[label] = pulsar_dates.get(label, 0) + 1
+
+    rows = []
+    for pulsar in sorted(dates_by_pulsar):
+        pulsar_dates = dates_by_pulsar[pulsar]
+        rows.append(
+            {
+                "Pulsar": pulsar,
+                "Observations": sum(pulsar_dates.values()),
+                "Latest": next(iter(pulsar_dates)),
+                "Observation Dates": ", ".join(
+                    label if count == 1 else f"{label} (x{count})" for label, count in pulsar_dates.items()
+                ),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def render_archive_tab() -> None:
     st.markdown(
         """
         <div class="dart-highlight">
             <div class="dart-highlight-title">Observation Archive</div>
             <div class="dart-highlight-meta">
-                Search, filter, preview, and download recent FITS observations from one place.
+                Search, filter by pulsar and observation date, preview, and download FITS observations.
             </div>
         </div>
         """,
@@ -820,7 +899,7 @@ def render_archive_tab() -> None:
     ).strip()
 
     available_pulsars = sorted({record["pulsar"] for record in archive_records})
-    pulsar_col, preview_filter_col, scope_col, sort_col = st.columns([2.3, 1.1, 1, 1.4])
+    pulsar_col, date_col = st.columns([1, 1])
 
     with pulsar_col:
         selected_pulsars = st.multiselect(
@@ -829,12 +908,38 @@ def render_archive_tab() -> None:
             default=[],
             key="archive_pulsar_filter",
         )
+
+    # Only offer the dates that exist for the chosen pulsars, newest first, with counts.
+    date_counts: dict[str, int] = {}
+    for record in archive_records:
+        if selected_pulsars and record["pulsar"] not in selected_pulsars:
+            continue
+        label = record["observation_date_label"]
+        date_counts[label] = date_counts.get(label, 0) + 1
+    with date_col:
+        selected_dates = st.multiselect(
+            f"Observation dates ({len(date_counts)} available)",
+            options=list(date_counts),
+            default=[],
+            format_func=lambda label: f"{label}  ·  {date_counts[label]} obs",
+            placeholder="All dates",
+            key="archive_date_filter",
+        )
+
+    preview_filter_col, fits_filter_col, scope_col, sort_col = st.columns([1, 1, 1, 1.4])
     with preview_filter_col:
         preview_only = st.checkbox(
             "Preview only",
             value=False,
             help="Only show observations with a preview PNG.",
             key="archive_preview_only",
+        )
+    with fits_filter_col:
+        fits_only = st.checkbox(
+            "FITS only",
+            value=False,
+            help="Only show observations with a downloadable FITS file.",
+            key="archive_fits_only",
         )
     with scope_col:
         show_all_matches = st.checkbox(
@@ -850,6 +955,9 @@ def render_archive_tab() -> None:
             key="archive_sort_mode",
         )
 
+    with st.expander(f"Available observation dates · {len(available_pulsars)} pulsars", expanded=False):
+        st.dataframe(build_date_overview(archive_records), width='stretch', hide_index=True)
+
     normalized_query = search_query.lower()
     filtered_records = []
     for record in archive_records:
@@ -857,7 +965,7 @@ def render_archive_tab() -> None:
             [
                 record["pulsar"],
                 record["file_name"],
-                record["observation_date"],
+                record["observation_date_label"],
                 record["created_at"],
             ]
         ).lower()
@@ -866,19 +974,24 @@ def render_archive_tab() -> None:
             continue
         if selected_pulsars and record["pulsar"] not in selected_pulsars:
             continue
+        if selected_dates and record["observation_date_label"] not in selected_dates:
+            continue
         if preview_only and record["preview_path"] is None:
+            continue
+        if fits_only and record["fits_path"] is None:
             continue
 
         filtered_records.append(record)
 
     if sort_mode == "Oldest":
-        filtered_records.sort(key=lambda record: record["created_ts"])
+        filtered_records.sort(key=archive_sort_key)
     elif sort_mode == "Pulsar A-Z":
-        filtered_records.sort(key=lambda record: (record["pulsar"], -record["created_ts"]))
+        filtered_records.sort(key=archive_sort_key, reverse=True)
+        filtered_records.sort(key=lambda record: record["pulsar"])
     elif sort_mode == "Largest FITS":
         filtered_records.sort(key=lambda record: record["file_size_bytes"], reverse=True)
     else:
-        filtered_records.sort(key=lambda record: record["created_ts"], reverse=True)
+        filtered_records.sort(key=archive_sort_key, reverse=True)
 
     records_to_display = filtered_records if show_all_matches else filtered_records[:ARCHIVE_RECENT_LIMIT]
 
@@ -890,7 +1003,7 @@ def render_archive_tab() -> None:
     if show_all_matches:
         st.caption("Showing all filtered observations.")
     else:
-        st.caption(f"Showing the latest {min(ARCHIVE_RECENT_LIMIT, len(records_to_display))} filtered observations.")
+        st.caption(f"Showing the latest {len(records_to_display)} filtered observations. Tick 'Show all' to see every match.")
 
     if not records_to_display:
         st.warning("No archive entries matched the current search and filters.")
@@ -901,18 +1014,11 @@ def render_archive_tab() -> None:
         feature_meta_col, feature_preview_col = st.columns([1.8, 1.2])
         with feature_meta_col:
             st.subheader(f"Featured: {featured_record['pulsar']}")
-            st.write(f"Latest file: `{featured_record['file_name']}`")
-            st.write(f"Observation Date: {featured_record['observation_date']}")
+            st.write(f"File: `{featured_record['file_name']}`")
+            st.write(f"Observation Date: {featured_record['observation_date_label']}")
             st.write(f"Added (IST): {featured_record['created_at']}")
             st.write(f"FITS Size: {featured_record['file_size']}")
-            st.download_button(
-                "Download Featured FITS",
-                data=load_binary_file(featured_record["fits_path"]),
-                file_name=featured_record["file_name"],
-                mime="application/fits",
-                key=build_widget_key("download_featured_fits", featured_record["fits_path"]),
-                width='stretch',
-            )
+            render_fits_download(featured_record, "Download Featured FITS", "download_featured_fits")
         with feature_preview_col:
             if featured_record["preview_path"]:
                 st.image(
@@ -927,7 +1033,8 @@ def render_archive_tab() -> None:
         [
             {
                 "Pulsar": record["pulsar"],
-                "Observation Date": record["observation_date"],
+                "Observation Date": record["observation_date_label"],
+                "File": record["file_name"],
                 "Added (IST)": record["created_at"],
                 "FITS Size": record["file_size"],
                 "Preview": "Yes" if record["preview_path"] else "No",
@@ -946,18 +1053,11 @@ def render_archive_tab() -> None:
         with card_columns[index % 2]:
             with st.container(border=True):
                 st.subheader(record["pulsar"])
-                st.caption(f"Observed on {record['observation_date']}")
+                st.caption(f"Observed on {record['observation_date_label']}")
                 st.write(f"File: `{record['file_name']}`")
                 st.write(f"Added (IST): {record['created_at']}")
                 st.write(f"FITS Size: {record['file_size']}")
-                st.download_button(
-                    "Download FITS",
-                    data=load_binary_file(record["fits_path"]),
-                    file_name=record["file_name"],
-                    mime="application/fits",
-                    key=build_widget_key("download_fits", record["fits_path"]),
-                    width='stretch',
-                )
+                render_fits_download(record, "Download FITS", "download_fits")
                 if record["preview_path"]:
                     st.image(
                         record["preview_path"],
