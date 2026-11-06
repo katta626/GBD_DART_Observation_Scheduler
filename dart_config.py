@@ -65,7 +65,7 @@ _DEFAULT_CONFIG = {
     },
     "diagnostics": {
         "center_frequency_mhz": 175.0,
-        "bandwidth_mhz": 16.0,
+        "bandwidth_mhz": 16.5,
         "channel0_is_high": True,
         "hour_channel_start": 50,
         "hour_channel_stop": 200,

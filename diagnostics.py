@@ -40,7 +40,7 @@ HEATMAP_SCALE = [[0.0, "#0d366b"], [0.25, "#1c5cab"], [0.5, "#3987e5"], [0.75, "
 @dataclass(frozen=True)
 class Band:
     center_mhz: float = 175.0
-    bandwidth_mhz: float = 16.0
+    bandwidth_mhz: float = 16.5
     channel0_is_high: bool = True
 
     def channel_frequencies(self, channel_count: int) -> np.ndarray:
