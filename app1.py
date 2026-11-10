@@ -399,7 +399,8 @@ def build_archive_records(base_dir: str) -> list[dict]:
     return records
 
 
-@st.cache_data(show_spinner=False, ttl=60)
+# FITS files are large: keep at most two in memory, only the ones picked for download.
+@st.cache_data(show_spinner=False, ttl=60, max_entries=2)
 def load_binary_file(file_path: str) -> bytes:
     with open(file_path, "rb") as file_handle:
         return file_handle.read()
@@ -842,18 +843,46 @@ def render_log_updates_tab() -> None:
                 st.text("No matching logs yet.")
 
 
-def render_fits_download(record: dict, label: str, key_prefix: str) -> None:
-    if record["fits_path"] is None:
+def format_archive_choice(record: dict) -> str:
+    return f"{record['pulsar']} · {record['observation_date_label']} · {record['file_name']} ({record['file_size']})"
+
+
+def render_download_picker(filtered_records: list[dict]) -> None:
+    """One download button for the picked observation; only that FITS file is read."""
+    downloadable = [record for record in filtered_records if record["fits_path"]]
+    with st.container(border=True):
+        st.markdown("**Download a FITS file**")
+        if not downloadable:
+            st.caption("None of the matching observations has a FITS file.")
+            return
+        records_by_path = {record["fits_path"]: record for record in downloadable}
+        pick_col, button_col = st.columns([3, 1], vertical_alignment="bottom")
+        with pick_col:
+            chosen_path = st.selectbox(
+                f"Observation ({len(downloadable)} with FITS in the current results)",
+                options=list(records_by_path),
+                format_func=lambda path: format_archive_choice(records_by_path[path]),
+                key="archive_download_choice",
+            )
+        with button_col:
+            st.download_button(
+                "Download FITS",
+                data=load_binary_file(chosen_path),
+                file_name=os.path.basename(chosen_path),
+                mime="application/fits",
+                key="archive_download_button",
+                type="primary",
+                width='stretch',
+            )
+
+
+def render_archive_card_meta(record: dict) -> None:
+    st.write(f"File: `{record['file_name']}`")
+    st.write(f"Added (IST): {record['created_at']}")
+    if record["fits_path"]:
+        st.write(f"FITS Size: {record['file_size']}")
+    else:
         st.caption("FITS file not available for this observation.")
-        return
-    st.download_button(
-        label,
-        data=load_binary_file(record["fits_path"]),
-        file_name=os.path.basename(record["fits_path"]),
-        mime="application/fits",
-        key=build_widget_key(key_prefix, record["fits_path"]),
-        width='stretch',
-    )
 
 
 def build_date_overview(archive_records: list[dict]) -> pd.DataFrame:
@@ -932,7 +961,7 @@ def render_archive_tab() -> None:
             key="archive_date_filter",
         )
 
-    preview_filter_col, fits_filter_col, scope_col, sort_col = st.columns([1, 1, 1, 1.4])
+    preview_filter_col, fits_filter_col, sort_col = st.columns([1, 1, 1.4])
     with preview_filter_col:
         preview_only = st.checkbox(
             "Preview only",
@@ -946,13 +975,6 @@ def render_archive_tab() -> None:
             value=False,
             help="Only show observations with a downloadable FITS file.",
             key="archive_fits_only",
-        )
-    with scope_col:
-        show_all_matches = st.checkbox(
-            "Show all",
-            value=False,
-            help="By default only the latest matches are shown.",
-            key="archive_show_all_matches",
         )
     with sort_col:
         sort_mode = st.selectbox(
@@ -999,41 +1021,19 @@ def render_archive_tab() -> None:
     else:
         filtered_records.sort(key=archive_sort_key, reverse=True)
 
-    records_to_display = filtered_records if show_all_matches else filtered_records[:ARCHIVE_RECENT_LIMIT]
+    page_size = max(1, ARCHIVE_RECENT_LIMIT)
+    page_count = max(1, -(-len(filtered_records) // page_size))
 
-    total_col, matched_col, showing_col = st.columns(3)
+    total_col, matched_col, pages_col = st.columns(3)
     total_col.metric("Total observations", len(archive_records))
     matched_col.metric("Matches", len(filtered_records))
-    showing_col.metric("Showing", len(records_to_display))
+    pages_col.metric("Pages", page_count)
 
-    if show_all_matches:
-        st.caption("Showing all filtered observations.")
-    else:
-        st.caption(f"Showing the latest {len(records_to_display)} filtered observations. Tick 'Show all' to see every match.")
-
-    if not records_to_display:
+    if not filtered_records:
         st.warning("No archive entries matched the current search and filters.")
         return
 
-    featured_record = records_to_display[0]
-    with st.container(border=True):
-        feature_meta_col, feature_preview_col = st.columns([1.8, 1.2])
-        with feature_meta_col:
-            st.subheader(f"Featured: {featured_record['pulsar']}")
-            st.write(f"File: `{featured_record['file_name']}`")
-            st.write(f"Observation Date: {featured_record['observation_date_label']}")
-            st.write(f"Added (IST): {featured_record['created_at']}")
-            st.write(f"FITS Size: {featured_record['file_size']}")
-            render_fits_download(featured_record, "Download Featured FITS", "download_featured_fits")
-        with feature_preview_col:
-            if featured_record["preview_path"]:
-                st.image(
-                    featured_record["preview_path"],
-                    caption=f"{featured_record['pulsar']} preview",
-                    width='stretch',
-                )
-            else:
-                st.info("Preview image not available.")
+    render_download_picker(filtered_records)
 
     archive_summary = pd.DataFrame(
         [
@@ -1045,12 +1045,43 @@ def render_archive_tab() -> None:
                 "FITS Size": record["file_size"],
                 "Preview": "Yes" if record["preview_path"] else "No",
             }
-            for record in records_to_display
+            for record in filtered_records
         ]
     )
-    st.dataframe(archive_summary, width='stretch', hide_index=True)
+    st.caption(f"All {len(filtered_records)} matching observations:")
+    st.dataframe(archive_summary, width='stretch', hide_index=True, height=min(420, 38 + 35 * len(filtered_records)))
 
-    remaining_records = records_to_display[1:] if len(records_to_display) > 1 else []
+    page = 1
+    if page_count > 1:
+        page = st.selectbox(
+            "Preview page",
+            options=list(range(1, page_count + 1)),
+            format_func=lambda number: (
+                f"Page {number} of {page_count} · observations "
+                f"{(number - 1) * page_size + 1}–{min(number * page_size, len(filtered_records))}"
+            ),
+            key="archive_preview_page",
+        )
+    page_records = filtered_records[(page - 1) * page_size : page * page_size]
+
+    featured_record = page_records[0]
+    with st.container(border=True):
+        feature_meta_col, feature_preview_col = st.columns([1.8, 1.2])
+        with feature_meta_col:
+            st.subheader(f"Featured: {featured_record['pulsar']}")
+            st.write(f"Observation Date: {featured_record['observation_date_label']}")
+            render_archive_card_meta(featured_record)
+        with feature_preview_col:
+            if featured_record["preview_path"]:
+                st.image(
+                    featured_record["preview_path"],
+                    caption=f"{featured_record['pulsar']} preview",
+                    width='stretch',
+                )
+            else:
+                st.info("Preview image not available.")
+
+    remaining_records = page_records[1:]
     if not remaining_records:
         return
 
@@ -1060,10 +1091,7 @@ def render_archive_tab() -> None:
             with st.container(border=True):
                 st.subheader(record["pulsar"])
                 st.caption(f"Observed on {record['observation_date_label']}")
-                st.write(f"File: `{record['file_name']}`")
-                st.write(f"Added (IST): {record['created_at']}")
-                st.write(f"FITS Size: {record['file_size']}")
-                render_fits_download(record, "Download FITS", "download_fits")
+                render_archive_card_meta(record)
                 if record["preview_path"]:
                     st.image(
                         record["preview_path"],
