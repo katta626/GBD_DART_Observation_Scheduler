@@ -1,5 +1,7 @@
 from datetime import datetime
 import atexit
+import base64
+import calendar
 import glob
 import html
 import os
@@ -160,6 +162,11 @@ def get_all_time():
     return observing_time.sidereal_time("mean"), ist_now
 
 
+def get_current_mjd(moment: datetime) -> float:
+    """Modified Julian Date (UTC) of a timezone-aware time, from the same astropy Time used for LST."""
+    return float(Time(moment).mjd)
+
+
 def get_current_lst_time() -> str:
     lst, _ = get_all_time()
     return format_sidereal_time(lst)
@@ -187,12 +194,12 @@ def sync_runtime_config() -> dict:
     return runtime_settings
 
 
-BRAND_IMAGE_WIDTH = 640
+BACKGROUND_MAX_WIDTH = 1920
 
 
 @st.cache_data(show_spinner=False)
-def load_brand_image(image_path: str, modified_ts: float) -> bytes:
-    """Shrink dart.png once (it is ~6 MB as PNG) to a small JPEG for the top of the sidebar.
+def encode_background_image(image_path: str, modified_ts: float) -> str:
+    """Shrink the background once (it is ~6 MB as PNG) and return it as a base64 JPEG.
 
     `modified_ts` is part of the cache key, so replacing dart.png refreshes the cache.
     """
@@ -201,18 +208,31 @@ def load_brand_image(image_path: str, modified_ts: float) -> bytes:
 
     with Image.open(image_path) as image:
         image = image.convert("RGB")
-        if image.width > BRAND_IMAGE_WIDTH:
-            height = round(image.height * BRAND_IMAGE_WIDTH / image.width)
-            image = image.resize((BRAND_IMAGE_WIDTH, height), Image.LANCZOS)
+        if image.width > BACKGROUND_MAX_WIDTH:
+            height = round(image.height * BACKGROUND_MAX_WIDTH / image.width)
+            image = image.resize((BACKGROUND_MAX_WIDTH, height), Image.LANCZOS)
         buffer = BytesIO()
-        image.save(buffer, format="JPEG", quality=88, optimize=True)
-    return buffer.getvalue()
+        image.save(buffer, format="JPEG", quality=85, optimize=True)
+    return base64.b64encode(buffer.getvalue()).decode()
 
 
-def render_brand(image_path: str) -> None:
-    if not os.path.exists(image_path):
+def set_bg_hack(main_bg: str) -> None:
+    if not os.path.exists(main_bg):
         return
-    st.image(load_brand_image(image_path, os.path.getmtime(image_path)), width="stretch")
+
+    encoded_image = encode_background_image(main_bg, os.path.getmtime(main_bg))
+
+    st.markdown(
+        f"""
+        <style>
+        .stApp {{
+            background: url(data:image/jpeg;base64,{encoded_image});
+            background-size: cover;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def format_countdown(countdown_seconds) -> str:
@@ -303,13 +323,60 @@ def build_widget_key(prefix: str, value: str) -> str:
 
 
 def inject_custom_styles() -> None:
-    """Colours come from .streamlit/config.toml; this only adds the sidebar cards and spacing."""
+    """Colours come from .streamlit/config.toml; this adds the content panel, header strip and cards."""
     st.markdown(
         """
         <style>
-        .block-container { padding-top: 2.6rem; }
-        [data-testid="stSidebar"] img { border-radius: 10px; }
+        .block-container { padding-top: 4.2rem; }
         [data-testid="stCaptionContainer"] { font-variant-numeric: tabular-nums; }
+
+        /* The wallpaper stays behind the page; the tabs sit on a panel so their content is readable. */
+        .stMain .stTabs {
+            background: rgba(255, 255, 255, 0.94);
+            border: 1px solid rgba(12, 28, 52, 0.12);
+            border-radius: 14px;
+            padding: 0.5rem 1.25rem 1.25rem;
+            box-shadow: 0 10px 30px rgba(12, 28, 52, 0.18);
+        }
+        .stPlotlyChart { border-radius: 12px; overflow: hidden; }
+
+        /* Clock, disk space and current observation in the empty middle of the page header. */
+        .st-key-dart_topbar {
+            position: fixed;
+            top: 0;
+            right: 9.5rem;
+            height: 3.75rem;
+            width: auto;
+            z-index: 999991;
+            display: flex;
+            align-items: center;
+        }
+        .dart-topbar { display: flex; gap: 0.45rem; align-items: center; font-variant-numeric: tabular-nums; }
+        .dart-chip {
+            background: rgba(12, 28, 52, 0.9);
+            border: 1px solid rgba(145, 196, 255, 0.25);
+            border-radius: 999px;
+            padding: 0.22rem 0.75rem;
+            color: #f0efec;
+            font-size: 0.82rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .dart-chip span {
+            color: #8bc4ff;
+            font-size: 0.66rem;
+            font-weight: 600;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            margin-right: 0.4rem;
+        }
+        /* With the sidebar open the observation is already shown there. */
+        .stApp:has([data-testid="stSidebar"][aria-expanded="true"]) .dart-chip-observation { display: none; }
+        @media (max-width: 1100px) { .dart-chip-optional { display: none; } }
+
+        .st-key-dart_calendar button { min-height: 2.3rem; padding: 0.1rem 0; }
+        .st-key-dart_calendar p { text-align: center; margin: 0; }
+
         .dart-info-card {
             background: rgba(255, 255, 255, 0.045);
             border: 1px solid rgba(145, 196, 255, 0.2);
@@ -470,6 +537,7 @@ def render_time_panel() -> None:
             <div class="dart-info-kicker">Clock · {html.escape(ist_now.strftime("%d-%m-%Y"))}</div>
             <div class="dart-info-title"><span>IST</span>{html.escape(ist_now.strftime("%H:%M:%S"))}</div>
             <div class="dart-info-title"><span>LST</span>{html.escape(current_lst_str)}</div>
+            <div class="dart-info-title"><span>MJD</span>{get_current_mjd(ist_now):.5f}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -500,6 +568,33 @@ def render_time_panel() -> None:
                 <div class="dart-info-meta">Elapsed: {html.escape(elapsed)}</div>
                 <div class="dart-info-meta">Started: {html.escape(active["started_at"])}</div>
                 <div class="dart-info-meta">Planned duration: {html.escape(str(planned_duration))} min</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+@st.fragment(run_every=get_fragment_refresh_seconds())
+def render_top_bar() -> None:
+    """Clock and disk space in the page header; the current observation too while the sidebar is closed."""
+    schedule = {obs["name"]: obs for obs in db.get_all_observations(order_by_countdown=True)}
+    current_lst, ist_now = get_all_time()
+    network = get_runtime_settings()["network"]
+    _, _, free = get_live_storage_stats(network["space_url"], network["request_timeout_seconds"])
+    active_observations = get_active_observations(schedule)
+    observing = ", ".join(
+        f"{active['name']} · {format_elapsed_time(active['started_at'])}" for active in active_observations
+    ) or "Idle"
+
+    with st.container(key="dart_topbar"):
+        st.markdown(
+            f"""
+            <div class="dart-topbar">
+                <div class="dart-chip dart-chip-observation"><span>Observing</span>{html.escape(observing)}</div>
+                <div class="dart-chip"><span>IST</span>{html.escape(ist_now.strftime("%H:%M:%S"))}</div>
+                <div class="dart-chip"><span>LST</span>{html.escape(format_sidereal_time(current_lst))}</div>
+                <div class="dart-chip dart-chip-optional"><span>MJD</span>{get_current_mjd(ist_now):.5f}</div>
+                <div class="dart-chip dart-chip-optional"><span>Free</span>{html.escape(free)}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -582,7 +677,7 @@ def upsert_quick_observation(duration: int, ra_start, countdown: float, name=QUI
 
 
 def render_quick_add() -> None:
-    with st.popover("Add now"):
+    with st.popover("⏱️ add_now"):
         current_ra = get_current_lst_time()
         st.caption(f"Current RA / LST: {current_ra}")
         st.session_state.quick_duration = st.number_input(
@@ -775,12 +870,12 @@ def render_scheduler_health() -> None:
 
 def main_1() -> None:
     inject_custom_styles()
+    set_bg_hack(BACKGROUND_IMAGE_PATH)
     runtime = get_runtime_state()
 
     schedule = {obs["name"]: obs for obs in db.get_all_observations(order_by_countdown=True)}
     with st.sidebar:
-        render_brand(BACKGROUND_IMAGE_PATH)
-        st.header("Scheduler")
+        st.header("SCHEDULER")
         render_time_panel()
 
         render_scheduler_health()
@@ -797,9 +892,7 @@ def main_1() -> None:
                 start_hdf5_sync_runner(runtime)
                 st.rerun()
 
-        # Two rows of two: four buttons side by side do not fit the sidebar width.
-        edit_col, add_col = st.columns(2)
-        quick_add_col, run_col = st.columns(2)
+        edit_col, add_col, quick_add_col, run_col = st.columns([2, 2, 4, 3])
 
         with edit_col:
             if st.button("✏️", key="open_edit_mode"):
@@ -1043,32 +1136,7 @@ def render_past_logs() -> None:
             st.rerun(scope="fragment")
 
 
-def build_date_overview(archive_records: list[dict]) -> pd.DataFrame:
-    """Per pulsar: how many observations and on which dates (newest first)."""
-    dates_by_pulsar: dict[str, dict[str, int]] = {}
-    for record in sorted(archive_records, key=archive_sort_key, reverse=True):
-        pulsar_dates = dates_by_pulsar.setdefault(record["pulsar"], {})
-        label = record["observation_date_label"]
-        pulsar_dates[label] = pulsar_dates.get(label, 0) + 1
-
-    rows = []
-    for pulsar in sorted(dates_by_pulsar):
-        pulsar_dates = dates_by_pulsar[pulsar]
-        rows.append(
-            {
-                "Pulsar": pulsar,
-                "Observations": sum(pulsar_dates.values()),
-                "Latest": next(iter(pulsar_dates)),
-                "Observation Dates": ", ".join(
-                    label if count == 1 else f"{label} (x{count})" for label, count in pulsar_dates.items()
-                ),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-ARCHIVE_GALLERY_COLUMNS = 3
-ARCHIVE_GALLERY_PAGE_SIZE = 6
+ALL_PULSARS = "All pulsars"
 
 
 def render_archive_detail(record: dict) -> None:
@@ -1096,40 +1164,35 @@ def render_archive_detail(record: dict) -> None:
             st.caption("FITS file not available for this observation.")
 
 
-def render_archive_gallery(records: list[dict], signature: str) -> None:
-    """Profile previews of the current results, a few per page."""
-    previews = [record for record in records if record["preview_path"]]
-    if not previews:
-        return
+def render_archive_calendar(year: int, month: int, day_counts: dict[int, int], selected_day: int) -> int | None:
+    """One month as a grid of day buttons; only days with observations can be clicked.
 
-    page_count = -(-len(previews) // ARCHIVE_GALLERY_PAGE_SIZE)
-    if st.session_state.get("archive_gallery_signature") != signature:
-        # The filters changed: start again from the first page.
-        st.session_state.archive_gallery_signature = signature
-        st.session_state.archive_gallery_page = 1
-    page = min(max(1, st.session_state.get("archive_gallery_page", 1)), page_count)
-
-    st.divider()
-    title_col, previous_col, next_col = st.columns([6, 1, 1], vertical_alignment="center")
-    title_col.markdown(f"**Profile previews** · page {page} of {page_count}")
-    if page_count > 1:
-        if previous_col.button("Previous", disabled=page == 1, key="archive_gallery_previous", width="stretch"):
-            st.session_state.archive_gallery_page = page - 1
-            st.rerun(scope="fragment")
-        if next_col.button("Next", disabled=page == page_count, key="archive_gallery_next", width="stretch"):
-            st.session_state.archive_gallery_page = page + 1
-            st.rerun(scope="fragment")
-
-    first = (page - 1) * ARCHIVE_GALLERY_PAGE_SIZE
-    columns = st.columns(ARCHIVE_GALLERY_COLUMNS)
-    for index, record in enumerate(previews[first : first + ARCHIVE_GALLERY_PAGE_SIZE]):
-        with columns[index % ARCHIVE_GALLERY_COLUMNS]:
-            with st.container(border=True):
-                st.image(record["preview_path"], width="stretch")
-                st.caption(f"**{record['pulsar']}** · {record['observation_date_label']}")
+    Returns the day that was just clicked, if any.
+    """
+    clicked_day = None
+    with st.container(key="dart_calendar"):
+        for column, weekday in zip(st.columns(7), ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
+            column.caption(weekday)
+        for week in calendar.monthcalendar(year, month):
+            for column, day in zip(st.columns(7), week):
+                if day == 0:
+                    continue
+                observation_count = day_counts.get(day, 0)
+                if column.button(
+                    str(day),
+                    key=f"archive_day_{year}_{month}_{day}",
+                    disabled=observation_count == 0,
+                    type="primary" if day == selected_day else "secondary",
+                    help=f"{observation_count} observation{'s' if observation_count != 1 else ''}"
+                    if observation_count
+                    else None,
+                    width="stretch",
+                ):
+                    clicked_day = day
+    return clicked_day
 
 
-# A fragment: changing a filter or picking a row redraws only the archive, not the whole page.
+# A fragment: picking a pulsar, month or day redraws only the archive, not the whole page.
 @st.fragment
 def render_archive_tab() -> None:
     st.subheader("Observation archive")
@@ -1138,123 +1201,85 @@ def render_archive_tab() -> None:
         st.info("No FITS archives are available yet.")
         return
 
-    available_pulsars = sorted({record["pulsar"] for record in archive_records})
-    search_col, pulsar_col, date_col, sort_col = st.columns([2, 1.5, 1.5, 1])
-    with search_col:
-        search_query = st.text_input(
-            "Search",
-            placeholder="Pulsar, file name or observation date",
-            key="archive_search_query",
-        ).strip()
+    pulsar_counts: dict[str, int] = {}
+    for record in archive_records:
+        pulsar_counts[record["pulsar"]] = pulsar_counts.get(record["pulsar"], 0) + 1
+    pulsar_counts = {ALL_PULSARS: len(archive_records), **dict(sorted(pulsar_counts.items()))}
+
+    pulsar_col, month_col = st.columns(2)
     with pulsar_col:
-        selected_pulsars = st.multiselect(
-            "Pulsars",
-            options=available_pulsars,
-            default=[],
-            placeholder="All pulsars",
-            key="archive_pulsar_filter",
+        pulsar = st.selectbox(
+            "Pulsar",
+            options=list(pulsar_counts),
+            index=None,
+            placeholder="Choose a pulsar",
+            format_func=lambda name: f"{name}  ·  {pulsar_counts[name]} obs",
+            key="archive_pulsar",
         )
-
-    # Only offer the dates that exist for the chosen pulsars, newest first, with counts.
-    date_counts: dict[str, int] = {}
-    for record in archive_records:
-        if selected_pulsars and record["pulsar"] not in selected_pulsars:
-            continue
-        label = record["observation_date_label"]
-        date_counts[label] = date_counts.get(label, 0) + 1
-    with date_col:
-        selected_dates = st.multiselect(
-            f"Observation dates ({len(date_counts)} available)",
-            options=list(date_counts),
-            default=[],
-            format_func=lambda label: f"{label}  ·  {date_counts[label]} obs",
-            placeholder="All dates",
-            key="archive_date_filter",
+    if pulsar is None:
+        st.caption(
+            f"{len(archive_records)} observations of {len(pulsar_counts) - 1} pulsars. "
+            "Choose a pulsar to see the days it was observed."
         )
-    with sort_col:
-        sort_mode = st.selectbox(
-            "Sort by",
-            options=["Newest", "Oldest", "Pulsar A-Z", "Largest FITS"],
-            key="archive_sort_mode",
-        )
-
-    normalized_query = search_query.lower()
-    filtered_records = []
-    for record in archive_records:
-        searchable_text = " ".join(
-            [
-                record["pulsar"],
-                record["file_name"],
-                record["observation_date_label"],
-                record["created_at"],
-            ]
-        ).lower()
-
-        if normalized_query and normalized_query not in searchable_text:
-            continue
-        if selected_pulsars and record["pulsar"] not in selected_pulsars:
-            continue
-        if selected_dates and record["observation_date_label"] not in selected_dates:
-            continue
-
-        filtered_records.append(record)
-
-    if sort_mode == "Oldest":
-        filtered_records.sort(key=archive_sort_key)
-    elif sort_mode == "Pulsar A-Z":
-        filtered_records.sort(key=archive_sort_key, reverse=True)
-        filtered_records.sort(key=lambda record: record["pulsar"])
-    elif sort_mode == "Largest FITS":
-        filtered_records.sort(key=lambda record: record["file_size_bytes"], reverse=True)
-    else:
-        filtered_records.sort(key=archive_sort_key, reverse=True)
-
-    if not filtered_records:
-        st.warning("No archive entries matched the current search and filters.")
         return
 
-    st.caption(
-        f"{len(filtered_records)} of {len(archive_records)} observations · {len(available_pulsars)} pulsars · "
-        "click a row to preview and download that observation"
-    )
+    records = [record for record in archive_records if pulsar in (ALL_PULSARS, record["pulsar"])]
 
-    # A new table key whenever the filters change, so an old row selection is not carried over.
-    signature = build_widget_key(
-        "archive", "|".join([normalized_query, *selected_pulsars, *selected_dates, sort_mode])
-    )
-    archive_summary = pd.DataFrame(
-        [
-            {
-                "Pulsar": record["pulsar"],
-                "Observation Date": record["observation_date_label"],
-                "FITS Size": record["file_size"],
-                "Preview": "Yes" if record["preview_path"] else "No",
-                "Added (IST)": record["created_at"],
-                "File": record["file_name"],
-            }
-            for record in filtered_records
-        ]
-    )
-    table_col, detail_col = st.columns([1.7, 1])
-    with table_col:
-        table_event = st.dataframe(
-            archive_summary,
-            width='stretch',
-            hide_index=True,
-            height=min(460, 38 + 35 * len(filtered_records)),
-            on_select="rerun",
-            selection_mode="single-row",
-            key=f"{signature}_table",
+    # Months that have observations, newest first; files without a readable date come last.
+    def month_of(record: dict) -> tuple[int, int] | None:
+        observation_date = record["observation_date"]
+        return (observation_date.year, observation_date.month) if observation_date else None
+
+    month_counts: dict[tuple[int, int] | None, int] = {}
+    for record in records:
+        month_counts[month_of(record)] = month_counts.get(month_of(record), 0) + 1
+    months = sorted((month for month in month_counts if month), reverse=True) + ([None] if None in month_counts else [])
+    with month_col:
+        month = st.selectbox(
+            f"Month ({len(months)} with observations)",
+            options=months,
+            format_func=lambda value: (
+                f"{calendar.month_name[value[1]]} {value[0]}" if value else UNKNOWN_DATE_LABEL + " date"
+            )
+            + f"  ·  {month_counts[value]} obs",
+            key=build_widget_key("archive_month", pulsar),
         )
-    selected_rows = [row for row in table_event.selection.rows if row < len(filtered_records)]
+    month_records = [record for record in records if month_of(record) == month]
+
+    if month is None:
+        st.caption("The observation date could not be read from these file names.")
+        day_records = month_records
+        detail_col = st.container()
+    else:
+        day_counts: dict[int, int] = {}
+        for record in month_records:
+            day = record["observation_date"].day
+            day_counts[day] = day_counts.get(day, 0) + 1
+        # The chosen day is remembered per pulsar and month; otherwise start on the latest day.
+        stored = st.session_state.get("archive_selected_day")
+        selected_day = stored[2] if stored and stored[:2] == (pulsar, month) and stored[2] in day_counts else max(day_counts)
+
+        calendar_col, detail_col = st.columns([1.1, 1])
+        with calendar_col:
+            clicked_day = render_archive_calendar(month[0], month[1], day_counts, selected_day)
+            st.caption("Days with observations can be clicked; the highlighted day is shown on the right.")
+        if clicked_day is not None and clicked_day != selected_day:
+            st.session_state.archive_selected_day = (pulsar, month, clicked_day)
+            st.rerun(scope="fragment")
+        day_records = [record for record in month_records if record["observation_date"].day == selected_day]
+
     with detail_col:
-        # Nothing selected yet: show the first (by default the newest) observation.
-        render_archive_detail(filtered_records[selected_rows[0] if selected_rows else 0])
-
-    render_archive_gallery(filtered_records, signature)
-
-    with st.expander(f"Observation dates by pulsar · {len(available_pulsars)} pulsars", expanded=False):
-        st.dataframe(build_date_overview(archive_records), width='stretch', hide_index=True)
+        record = day_records[0]
+        if len(day_records) > 1:
+            records_by_name = {entry["file_name"]: entry for entry in day_records}
+            chosen_name = st.selectbox(
+                f"Observation ({len(day_records)} on this day)" if month else f"Observation ({len(day_records)})",
+                options=list(records_by_name),
+                format_func=lambda name: f"{records_by_name[name]['pulsar']}  ·  {name}",
+                key="archive_day_observation",
+            )
+            record = records_by_name[chosen_name]
+        render_archive_detail(record)
 
 
 TRANSIENT_HDF5_DIR = Path(PROJECT_ROOT) / "transient_hdf5"
@@ -1452,22 +1477,24 @@ def render_live_diagnostic_plots() -> None:
 
 
 def main() -> None:
+    render_top_bar()
+
     # The plots tab is offered only where [ui].enable_diagnostics is on.
-    tab_names = ["Data archive", "Logs"]
+    tab_names = ["Log updates", "Pulsar data archive"]
     if get_runtime_settings()["ui"]["enable_diagnostics"]:
-        tab_names.insert(0, "Diagnostic plots")
+        tab_names.append("Diagnostic plots")
     tabs = dict(zip(tab_names, st.tabs(tab_names)))
+
+    with tabs["Log updates"]:
+        render_log_updates_tab()
+        render_past_logs()
+
+    with tabs["Pulsar data archive"]:
+        render_archive_tab()
 
     if "Diagnostic plots" in tabs:
         with tabs["Diagnostic plots"]:
             render_live_diagnostic_plots()
-
-    with tabs["Data archive"]:
-        render_archive_tab()
-
-    with tabs["Logs"]:
-        render_log_updates_tab()
-        render_past_logs()
 
 
 if __name__ == "__main__":

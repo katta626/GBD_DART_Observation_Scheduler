@@ -1,8 +1,11 @@
 # Look of the DART page. Streamlit reads this when `streamlit run app1.py` is started
 # from this folder. Only colours are set here; server options stay at their defaults.
 [theme]
-base = "dark"
+base = "light"
 primaryColor = "#2f74d0"
-backgroundColor = "#0c1c34"
-secondaryBackgroundColor = "#14294a"
+
+# The scheduler sidebar keeps its dark navy look.
+[theme.sidebar]
+backgroundColor = "#14294a"
+secondaryBackgroundColor = "#0c1c34"
 textColor = "#f0efec"
