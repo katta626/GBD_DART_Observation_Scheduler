@@ -384,6 +384,9 @@ def inject_custom_styles() -> None:
         .stApp:has([data-testid="stSidebar"][aria-expanded="true"]) .dart-chip-observation { display: none; }
         @media (max-width: 1100px) { .dart-chip-optional { display: none; } }
 
+        .dart-total { text-align: right; font-size: 0.85rem; font-weight: 600; color: #000000; }
+        .dart-total span { color: #1f5fbf; font-weight: 600; margin-right: 0.3rem; }
+
         .st-key-dart_calendar button { min-height: 2.3rem; padding: 0.1rem 0; }
         .st-key-dart_calendar p { text-align: center; margin: 0; }
 
@@ -1084,6 +1087,14 @@ def render_past_logs() -> None:
         st.info("No observation logs in log_files/ yet.")
         return
 
+    # Start on the log of the last observation, and move to a newer one when it is saved.
+    # Nothing is read from disk here; the log still opens only on "Show log".
+    latest_log = max(past_logs, key=lambda record: record["modified_ts"])
+    if st.session_state.get("past_log_latest") != latest_log["file_name"]:
+        st.session_state.past_log_latest = latest_log["file_name"]
+        st.session_state.past_log_pulsar = latest_log["pulsar"]
+        st.session_state.past_log_file = latest_log["file_name"]
+
     log_counts: dict[str, int] = {}
     for record in past_logs:
         log_counts[record["pulsar"]] = log_counts.get(record["pulsar"], 0) + 1
@@ -1119,7 +1130,10 @@ def render_past_logs() -> None:
             st.session_state.past_log_shown = chosen_name
 
     if st.session_state.get("past_log_shown") != chosen_name:
-        st.caption("Choose a pulsar and a date, then press Show log.")
+        if chosen_name == latest_log["file_name"]:
+            st.caption("The log of the last observation is selected. Press Show log to open it.")
+        else:
+            st.caption("Press Show log to open this log.")
         return
 
     chosen = logs_by_name[chosen_name]
@@ -1180,49 +1194,96 @@ def render_archive_detail(record: dict) -> None:
             st.caption("FITS file not available for this observation.")
 
 
-def render_archive_calendar(year: int, month: int, day_counts: dict[int, int], selected_day: int) -> int | None:
-    """One month as a grid of day buttons; only days with observations can be clicked.
+def archive_day_picker_key(pulsar: str, month: tuple[int, int] | None, day: int | None) -> str:
+    return build_widget_key("archive_day_observation", f"{pulsar}_{month}_{day}")
 
-    Returns the day that was just clicked, if any.
-    """
-    clicked_day = None
+
+def select_archive_day(pulsar: str, month: tuple[int, int], day: int) -> None:
+    st.session_state.archive_selected_day = (pulsar, month, day)
+
+
+def show_archive_record(record: dict) -> None:
+    """Open one observation in the calendar: its pulsar, month and day, and that file."""
+    pulsar = record["pulsar"]
+    observation_date = record["observation_date"]
+    month = (observation_date.year, observation_date.month) if observation_date else None
+    st.session_state.archive_pulsar = pulsar
+    st.session_state[build_widget_key("archive_month", pulsar)] = month
+    day = observation_date.day if observation_date else None
+    if observation_date:
+        st.session_state.archive_selected_day = (pulsar, month, day)
+    st.session_state[archive_day_picker_key(pulsar, month, day)] = record["file_name"]
+
+
+def render_archive_calendar(
+    pulsar: str, month: tuple[int, int], day_counts: dict[int, int], selected_day: int
+) -> None:
+    """One month as a grid of day buttons; only days with observations can be clicked."""
     with st.container(key="dart_calendar"):
         for column, weekday in zip(st.columns(7), ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
             column.caption(weekday)
-        for week in calendar.monthcalendar(year, month):
+        for week in calendar.monthcalendar(*month):
             for column, day in zip(st.columns(7), week):
                 if day == 0:
                     continue
                 observation_count = day_counts.get(day, 0)
-                if column.button(
+                column.button(
                     str(day),
-                    key=f"archive_day_{year}_{month}_{day}",
+                    key=f"archive_day_{month[0]}_{month[1]}_{day}",
                     disabled=observation_count == 0,
                     type="primary" if day == selected_day else "secondary",
                     help=f"{observation_count} observation{'s' if observation_count != 1 else ''}"
                     if observation_count
                     else None,
+                    on_click=select_archive_day,
+                    args=(pulsar, month, day),
                     width="stretch",
-                ):
-                    clicked_day = day
-    return clicked_day
+                )
+
+
+ARCHIVE_LATEST_COUNT = 5
+
+
+def render_latest_observations(archive_records: list[dict]) -> None:
+    """The newest observations as small cards; "View" opens one in the calendar below."""
+    latest_records = archive_records[:ARCHIVE_LATEST_COUNT]
+    st.markdown(f"**Last {len(latest_records)} observations**")
+    for position, (column, record) in enumerate(zip(st.columns(ARCHIVE_LATEST_COUNT), latest_records)):
+        with column.container(border=True):
+            if record["preview_path"]:
+                st.image(record["preview_path"], width="stretch")
+            else:
+                st.caption("No preview")
+            st.caption(f"**{record['pulsar']}**  \n{record['observation_date_label']}")
+            st.button(
+                "View",
+                key=f"archive_latest_{position}",
+                on_click=show_archive_record,
+                args=(record,),
+                width="stretch",
+            )
 
 
 # A fragment: picking a pulsar, month or day redraws only the archive, not the whole page.
 @st.fragment
 def render_archive_tab() -> None:
-    st.subheader("Observation archive")
     archive_records = build_archive_records(FITS_PLOTS_DIR)
+    title_col, total_col = st.columns([3, 1], vertical_alignment="bottom")
+    title_col.subheader("Observation archive")
     if not archive_records:
         st.info("No FITS archives are available yet.")
         return
+    total_col.markdown(
+        f'<div class="dart-total"><span>Total observations</span> {len(archive_records)}</div>',
+        unsafe_allow_html=True,
+    )
+
+    render_latest_observations(archive_records)
 
     pulsar_counts: dict[str, int] = {}
     for record in archive_records:
         pulsar_counts[record["pulsar"]] = pulsar_counts.get(record["pulsar"], 0) + 1
     pulsar_counts = {ALL_PULSARS: len(archive_records), **dict(sorted(pulsar_counts.items()))}
-
-    st.metric("Total observations", len(archive_records))
 
     pulsar_col, month_col = st.columns(2)
     with pulsar_col:
@@ -1276,24 +1337,23 @@ def render_archive_tab() -> None:
 
         calendar_col, detail_col = st.columns([1.1, 1])
         with calendar_col:
-            clicked_day = render_archive_calendar(month[0], month[1], day_counts, selected_day)
+            render_archive_calendar(pulsar, month, day_counts, selected_day)
             st.caption("Days with observations can be clicked; the highlighted day is shown on the right.")
-        if clicked_day is not None and clicked_day != selected_day:
-            st.session_state.archive_selected_day = (pulsar, month, clicked_day)
-            st.rerun(scope="fragment")
         day_records = [record for record in month_records if record["observation_date"].day == selected_day]
 
     with detail_col:
         record = day_records[0]
         if len(day_records) > 1:
             records_by_name = {entry["file_name"]: entry for entry in day_records}
+            # A picker of its own for every day: a file chosen on one day must not be carried to
+            # another day, where it does not exist and the preview would not follow the click.
             chosen_name = st.selectbox(
                 f"Observation ({len(day_records)} on this day)" if month else f"Observation ({len(day_records)})",
                 options=list(records_by_name),
                 format_func=lambda name: f"{records_by_name[name]['pulsar']}  ·  {name}",
-                key="archive_day_observation",
+                key=archive_day_picker_key(pulsar, month, selected_day if month else None),
             )
-            record = records_by_name[chosen_name]
+            record = records_by_name.get(chosen_name, record)
         render_archive_detail(record)
 
 
