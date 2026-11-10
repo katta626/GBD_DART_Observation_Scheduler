@@ -1,6 +1,7 @@
 from datetime import datetime
 import atexit
 import base64
+import calendar
 import glob
 import html
 import os
@@ -31,7 +32,6 @@ except ModuleNotFoundError:
 from datastore import DataStore
 from dart_config import (
     APP_TIMEZONE,
-    ARCHIVE_RECENT_LIMIT,
     BACKGROUND_IMAGE_PATH,
     DB_PATH,
     FITS_PLOTS_DIR,
@@ -160,6 +160,11 @@ def get_all_time():
     ist_now = utc_now.astimezone(APP_TIMEZONE).replace(microsecond=0)
     observing_time = Time(utc_now, scale="utc", location=observing_location)
     return observing_time.sidereal_time("mean"), ist_now
+
+
+def get_current_mjd(moment: datetime) -> float:
+    """Modified Julian Date (UTC) of a timezone-aware time, from the same astropy Time used for LST."""
+    return float(Time(moment).mjd)
 
 
 def get_current_lst_time() -> str:
@@ -318,53 +323,107 @@ def build_widget_key(prefix: str, value: str) -> str:
 
 
 def inject_custom_styles() -> None:
+    """Colours come from .streamlit/config.toml; this adds the content panel, header strip and cards."""
     st.markdown(
         """
         <style>
+        .block-container { padding-top: 3.6rem; }
+        [data-testid="stCaptionContainer"] { font-variant-numeric: tabular-nums; }
+
+        /* The wallpaper stays behind the page; the tabs sit on a panel so their content is readable. */
+        .stMain .stTabs {
+            background: rgba(255, 255, 255, 0.94);
+            border: 1px solid rgba(12, 28, 52, 0.12);
+            border-radius: 14px;
+            padding: 0.5rem 1.25rem 1.25rem;
+            box-shadow: 0 10px 30px rgba(12, 28, 52, 0.18);
+        }
+        .stPlotlyChart { border-radius: 12px; overflow: hidden; }
+
+        /* Clock, disk space and current observation in the empty middle of the page header. */
+        /* Absolute: Streamlit's non-scrolling wrapper around the header and the main area is the
+           nearest positioned ancestor, so the strip stays in the header, centred over the main area
+           whatever the sidebar width. */
+        .st-key-dart_topbar {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            width: auto;
+            height: 3.75rem;
+            z-index: 999991;
+            pointer-events: none;
+        }
+        .dart-topbar {
+            display: flex;
+            gap: 0.45rem;
+            align-items: center;
+            justify-content: center;
+            height: 3.75rem;
+            font-variant-numeric: tabular-nums;
+        }
+        .dart-chip {
+            background: #ffffff;
+            border: 1px solid rgba(0, 0, 0, 0.28);
+            border-radius: 999px;
+            padding: 0.22rem 0.75rem;
+            color: #000000;
+            font-size: 0.82rem;
+            font-weight: 600;
+            white-space: nowrap;
+        }
+        .dart-chip span {
+            color: #1f5fbf;
+            font-size: 0.66rem;
+            font-weight: 600;
+            letter-spacing: 0.07em;
+            text-transform: uppercase;
+            margin-right: 0.4rem;
+        }
+        /* With the sidebar open the observation is already shown there. */
+        .stApp:has([data-testid="stSidebar"][aria-expanded="true"]) .dart-chip-observation { display: none; }
+        @media (max-width: 1100px) { .dart-chip-optional { display: none; } }
+
+        .st-key-dart_calendar button { min-height: 2.3rem; padding: 0.1rem 0; }
+        .st-key-dart_calendar p { text-align: center; margin: 0; }
+
         .dart-info-card {
-            background: linear-gradient(145deg, rgba(12, 28, 52, 0.92), rgba(28, 66, 98, 0.85));
-            border: 1px solid rgba(145, 196, 255, 0.22);
-            border-radius: 18px;
-            padding: 1rem 1.1rem;
-            margin: 0.4rem 0 0.8rem 0;
-            box-shadow: 0 16px 40px rgba(5, 16, 30, 0.22);
-            color: #f4f8ff;
+            background: #ffffff;
+            border: 1px solid rgba(12, 28, 52, 0.14);
+            border-radius: 12px;
+            padding: 0.7rem 0.9rem;
+            margin: 0.25rem 0 0.6rem 0;
+            color: #000000;
+            font-variant-numeric: tabular-nums;
         }
         .dart-info-kicker {
-            font-size: 0.72rem;
+            font-size: 0.7rem;
+            font-weight: 600;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: #8bd6ff;
-            margin-bottom: 0.35rem;
+            color: #1f5fbf;
+            margin-bottom: 0.25rem;
         }
         .dart-info-title {
-            font-size: 1.25rem;
-            font-weight: 700;
-            line-height: 1.2;
-            margin-bottom: 0.2rem;
+            font-size: 1.1rem;
+            font-weight: 650;
+            line-height: 1.3;
         }
+        .dart-info-title span {
+            display: inline-block;
+            width: 2.6rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #1f5fbf;
+        }
+        /* LST and MJD side by side; they wrap onto two lines only if the sidebar is too narrow. */
+        .dart-info-row { display: flex; flex-wrap: wrap; column-gap: 1.1rem; }
         .dart-info-meta {
-            font-size: 0.92rem;
-            color: rgba(244, 248, 255, 0.78);
+            font-size: 0.88rem;
+            color: #3b4657;
             line-height: 1.45;
         }
-        .dart-highlight {
-            background: linear-gradient(135deg, rgba(240, 248, 255, 0.9), rgba(214, 236, 255, 0.88));
-            border: 1px solid rgba(63, 120, 180, 0.2);
-            border-radius: 20px;
-            padding: 1rem 1.1rem;
-            margin-bottom: 1rem;
-            color: #17324d;
-        }
-        .dart-highlight-title {
-            font-size: 1.35rem;
-            font-weight: 700;
-            margin-bottom: 0.2rem;
-        }
-        .dart-highlight-meta {
-            font-size: 0.95rem;
-            color: #35526f;
-        }
+        .dart-info-meta span { color: #1f5fbf; font-weight: 600; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -478,10 +537,9 @@ def render_time_panel() -> None:
     st.markdown(
         f"""
         <div class="dart-info-card">
-            <div class="dart-info-kicker">Live Space Available</div>
-            <div class="dart-info-title">Avaliable Space {html.escape(free)}</div>
-            <div class="dart-info-meta">Used {html.escape(used)}</div>
-            <div class="dart-info-meta">Total Space {html.escape(total)}</div>
+            <div class="dart-info-kicker">Disk space</div>
+            <div class="dart-info-title"><span>Free</span>{html.escape(free)}</div>
+            <div class="dart-info-meta"><span>Used</span> {html.escape(used)} · <span>Total</span> {html.escape(total)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -490,10 +548,12 @@ def render_time_panel() -> None:
     st.markdown(
         f"""
         <div class="dart-info-card">
-            <div class="dart-info-kicker">Clock</div>
-            <div class="dart-info-title">IST :  {html.escape(ist_now.strftime("%H:%M:%S ; %d-%m-%Y IST"))}</div>
-            <div class="dart-info-title">LST :  {html.escape(current_lst_str)}</div>
-            <div class="dart-info-title">{html.escape(ist_now.strftime("%d-%m-%Y IST"))}</div>
+            <div class="dart-info-kicker">Clock · {html.escape(ist_now.strftime("%d-%m-%Y"))}</div>
+            <div class="dart-info-title"><span>IST</span>{html.escape(ist_now.strftime("%H:%M:%S"))}</div>
+            <div class="dart-info-row">
+                <div class="dart-info-title"><span>LST</span>{html.escape(current_lst_str)}</div>
+                <div class="dart-info-title"><span>MJD</span>{get_current_mjd(ist_now):.5f}</div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -524,6 +584,33 @@ def render_time_panel() -> None:
                 <div class="dart-info-meta">Elapsed: {html.escape(elapsed)}</div>
                 <div class="dart-info-meta">Started: {html.escape(active["started_at"])}</div>
                 <div class="dart-info-meta">Planned duration: {html.escape(str(planned_duration))} min</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
+@st.fragment(run_every=get_fragment_refresh_seconds())
+def render_top_bar() -> None:
+    """Clock and disk space in the page header; the current observation too while the sidebar is closed."""
+    schedule = {obs["name"]: obs for obs in db.get_all_observations(order_by_countdown=True)}
+    current_lst, ist_now = get_all_time()
+    network = get_runtime_settings()["network"]
+    _, _, free = get_live_storage_stats(network["space_url"], network["request_timeout_seconds"])
+    active_observations = get_active_observations(schedule)
+    observing = ", ".join(
+        f"{active['name']} · {format_elapsed_time(active['started_at'])}" for active in active_observations
+    ) or "Idle"
+
+    with st.container(key="dart_topbar"):
+        st.markdown(
+            f"""
+            <div class="dart-topbar">
+                <div class="dart-chip dart-chip-observation"><span>Observing</span>{html.escape(observing)}</div>
+                <div class="dart-chip"><span>IST</span>{html.escape(ist_now.strftime("%H:%M:%S"))}</div>
+                <div class="dart-chip"><span>LST</span>{html.escape(format_sidereal_time(current_lst))}</div>
+                <div class="dart-chip dart-chip-optional"><span>MJD</span>{get_current_mjd(ist_now):.5f}</div>
+                <div class="dart-chip dart-chip-optional"><span>Free</span>{html.escape(free)}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -761,19 +848,6 @@ def render_edit_observation(schedule: dict[str, dict]) -> None:
             st.rerun()
 
 
-def read_all_lines(file_path: str) -> list[str]:
-    if not os.path.exists(file_path):
-        return []
-    with open(file_path, "r") as file_handle:
-        return [line.strip() for line in file_handle.readlines()]
-
-
-def filter_lines(lines: list[str], keywords: list[str]) -> list[str]:
-    if not keywords:
-        return lines
-    return [line for line in lines if any(keyword in line for keyword in keywords)]
-
-
 SCHEDULER_LIVE = "LIVE 🟢"
 SCHEDULER_STOPPED = "DEAD ☠️"
 SCHEDULER_CRASHED = "RESTART ⚠️"
@@ -897,30 +971,79 @@ LOG_FILTER_KEYWORDS = [
 OBSERVATION_LOG_PATTERN = re.compile(r"^(?P<pulsar>.+?)_\d{2}_\d{2}_\d{4}_observation\.log$")
 
 
+# The live view shows at most this many key lines; the whole log is under "Past observation logs".
+LIVE_LOG_MAX_LINES = 200
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def load_log(file_path: str, modified_ts: float, size_bytes: int) -> tuple[list[str], list[str]]:
+    """(all lines, key lines) of one log.
+
+    The file's modification time and size are the cache key, so a log is read and filtered
+    again only after it has changed, not on every page refresh.
+    """
+    with open(file_path, "r", errors="replace") as file_handle:
+        all_lines = [line.strip() for line in file_handle]
+    key_lines = [line for line in all_lines if any(keyword in line for keyword in LOG_FILTER_KEYWORDS)]
+    return all_lines, key_lines
+
+
+@st.cache_data(show_spinner=False, max_entries=16)
+def build_live_log_text(file_path: str, modified_ts: float, size_bytes: int) -> tuple[str, int]:
+    """(newest key lines first, number of key lines in the whole log)."""
+    _, key_lines = load_log(file_path, modified_ts, size_bytes)
+    return "\n".join(reversed(key_lines[-LIVE_LOG_MAX_LINES:])), len(key_lines)
+
+
+def get_log_stamp(file_path: str) -> tuple[float, int] | None:
+    try:
+        file_stat = os.stat(file_path)
+    except OSError:
+        return None
+    return file_stat.st_mtime, file_stat.st_size
+
+
+def show_log_text(text: str) -> None:
+    """Monospace box; long logs scroll inside it instead of stretching the page."""
+    if text.count("\n") >= 14:
+        st.code(text, language=None, height=360)
+    else:
+        st.code(text, language=None)
+
+
 @st.fragment(run_every=get_fragment_refresh_seconds())
 def render_log_updates_tab() -> None:
+    st.subheader("Current run")
     log_files = db.get_system_status("Log_Current") or []
     if isinstance(log_files, str):
         log_files = [log_files]
 
-    filter_keywords = LOG_FILTER_KEYWORDS
-
     if not log_files:
-        st.warning("No log files found in the current run.")
+        st.info("No log files found in the current run.")
         return
 
     st.caption(
-        f"Newest lines first · refreshes every {get_fragment_refresh_seconds():g} s · "
+        f"Key lines, newest first · refreshes every {get_fragment_refresh_seconds():g} s · "
         f"last checked {datetime.now(APP_TIMEZONE).strftime('%H:%M:%S IST')}"
     )
-    for log_file in log_files:
+    for position, log_file in enumerate(log_files):
         file_path = os.path.join(LOG_DIR, log_file)
-        with st.expander(f"Show Log Updates: {log_file}", expanded=False):
-            filtered_lines = filter_lines(read_all_lines(file_path), filter_keywords)
-            if filtered_lines:
-                st.text("\n".join(reversed(filtered_lines)))
-            else:
-                st.text("No matching logs yet.")
+        # Only the newest log starts open; earlier ones open when clicked.
+        with st.expander(log_file, expanded=position == len(log_files) - 1):
+            stamp = get_log_stamp(file_path)
+            try:
+                text, key_line_count = build_live_log_text(file_path, *stamp) if stamp else ("", 0)
+            except OSError:
+                text, key_line_count = "", 0
+            if not text:
+                st.caption("No matching logs yet.")
+                continue
+            if key_line_count > LIVE_LOG_MAX_LINES:
+                st.caption(
+                    f"Newest {LIVE_LOG_MAX_LINES} of {key_line_count} key lines. "
+                    "The whole log is under Past observation logs."
+                )
+            show_log_text(text)
 
 
 @st.cache_data(show_spinner=False, ttl=30)
@@ -951,7 +1074,9 @@ def list_past_logs(log_dir: str) -> list[dict]:
     return records
 
 
+@st.fragment
 def render_past_logs() -> None:
+    """A past log is read and shown only after "Show log" is pressed for it."""
     st.divider()
     st.subheader("Past observation logs")
     past_logs = list_past_logs(LOG_DIR)
@@ -962,7 +1087,7 @@ def render_past_logs() -> None:
     log_counts: dict[str, int] = {}
     for record in past_logs:
         log_counts[record["pulsar"]] = log_counts.get(record["pulsar"], 0) + 1
-    pulsar_col, date_col, view_col = st.columns([1.2, 1.2, 1])
+    pulsar_col, date_col, view_col, show_col = st.columns([1.2, 1.6, 1.1, 0.8], vertical_alignment="bottom")
     with pulsar_col:
         pulsar = st.selectbox(
             f"Pulsar ({len(log_counts)} with logs)",
@@ -984,287 +1109,192 @@ def render_past_logs() -> None:
         )
     with view_col:
         view_mode = st.radio(
-            "Show",
+            "Lines",
             options=["Key lines", "Full log"],
             horizontal=True,
             key="past_log_view",
         )
+    with show_col:
+        if st.button("Show log", type="primary", key="past_log_show", width="stretch"):
+            st.session_state.past_log_shown = chosen_name
+
+    if st.session_state.get("past_log_shown") != chosen_name:
+        st.caption("Choose a pulsar and a date, then press Show log.")
+        return
 
     chosen = logs_by_name[chosen_name]
-    all_lines = read_all_lines(chosen["path"])
-    lines = all_lines if view_mode == "Full log" else filter_lines(all_lines, LOG_FILTER_KEYWORDS)
+    stamp = get_log_stamp(chosen["path"])
+    try:
+        all_lines, key_lines = load_log(chosen["path"], *stamp) if stamp else ([], [])
+    except OSError:
+        all_lines, key_lines = [], []
+    lines = all_lines if view_mode == "Full log" else key_lines
     st.caption(f"`{chosen['file_name']}` · {len(lines)} of {len(all_lines)} lines")
-    with st.container(height=420):
-        st.text("\n".join(lines) if lines else "No matching lines in this log.")
-    st.download_button(
-        "Download this log",
-        data="\n".join(all_lines),
-        file_name=chosen["file_name"],
-        mime="text/plain",
-        key="past_log_download",
-    )
+    if lines:
+        show_log_text("\n".join(lines))
+    else:
+        st.caption("No matching lines in this log.")
+    download_col, hide_col, _ = st.columns([1, 1, 4])
+    with download_col:
+        st.download_button(
+            "Download log",
+            data="\n".join(all_lines),
+            file_name=chosen["file_name"],
+            mime="text/plain",
+            type="primary",
+            icon=":material/download:",
+            key="past_log_download",
+            width="stretch",
+        )
+    with hide_col:
+        if st.button("Hide log", key="past_log_hide", width="stretch"):
+            st.session_state.past_log_shown = None
+            st.rerun(scope="fragment")
 
-def format_archive_choice(record: dict) -> str:
-    return f"{record['pulsar']} · {record['observation_date_label']} · {record['file_name']} ({record['file_size']})"
+
+ALL_PULSARS = "All pulsars"
 
 
-def render_download_picker(filtered_records: list[dict]) -> None:
-    """One download button for the picked observation; only that FITS file is read."""
-    downloadable = [record for record in filtered_records if record["fits_path"]]
+def render_archive_detail(record: dict) -> None:
+    """The selected observation: preview, file details and its download button."""
     with st.container(border=True):
-        st.markdown("**Download a FITS file**")
-        if not downloadable:
-            st.caption("None of the matching observations has a FITS file.")
-            return
-        records_by_path = {record["fits_path"]: record for record in downloadable}
-        pick_col, button_col = st.columns([3, 1], vertical_alignment="bottom")
-        with pick_col:
-            chosen_path = st.selectbox(
-                f"Observation ({len(downloadable)} with FITS in the current results)",
-                options=list(records_by_path),
-                format_func=lambda path: format_archive_choice(records_by_path[path]),
-                key="archive_download_choice",
-            )
-        with button_col:
+        st.markdown(f"#### {record['pulsar']}")
+        st.caption(f"Observed {record['observation_date_label']} · added {record['created_at']}")
+        if record["preview_path"]:
+            st.image(record["preview_path"], width="stretch")
+        else:
+            st.caption("Preview image not available.")
+        st.caption(f"`{record['file_name']}`")
+        if record["fits_path"]:
             st.download_button(
-                "Download FITS",
-                data=load_binary_file(chosen_path),
-                file_name=os.path.basename(chosen_path),
+                f"Download FITS · {record['file_size']}",
+                data=load_binary_file(record["fits_path"]),
+                file_name=os.path.basename(record["fits_path"]),
                 mime="application/fits",
                 key="archive_download_button",
                 type="primary",
-                width='stretch',
+                icon=":material/download:",
+                width="stretch",
             )
+        else:
+            st.caption("FITS file not available for this observation.")
 
 
-def render_archive_card_meta(record: dict) -> None:
-    st.write(f"File: `{record['file_name']}`")
-    st.write(f"Added (IST): {record['created_at']}")
-    if record["fits_path"]:
-        st.write(f"FITS Size: {record['file_size']}")
-    else:
-        st.caption("FITS file not available for this observation.")
+def render_archive_calendar(year: int, month: int, day_counts: dict[int, int], selected_day: int) -> int | None:
+    """One month as a grid of day buttons; only days with observations can be clicked.
+
+    Returns the day that was just clicked, if any.
+    """
+    clicked_day = None
+    with st.container(key="dart_calendar"):
+        for column, weekday in zip(st.columns(7), ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")):
+            column.caption(weekday)
+        for week in calendar.monthcalendar(year, month):
+            for column, day in zip(st.columns(7), week):
+                if day == 0:
+                    continue
+                observation_count = day_counts.get(day, 0)
+                if column.button(
+                    str(day),
+                    key=f"archive_day_{year}_{month}_{day}",
+                    disabled=observation_count == 0,
+                    type="primary" if day == selected_day else "secondary",
+                    help=f"{observation_count} observation{'s' if observation_count != 1 else ''}"
+                    if observation_count
+                    else None,
+                    width="stretch",
+                ):
+                    clicked_day = day
+    return clicked_day
 
 
-def build_date_overview(archive_records: list[dict]) -> pd.DataFrame:
-    """Per pulsar: how many observations and on which dates (newest first)."""
-    dates_by_pulsar: dict[str, dict[str, int]] = {}
-    for record in sorted(archive_records, key=archive_sort_key, reverse=True):
-        pulsar_dates = dates_by_pulsar.setdefault(record["pulsar"], {})
-        label = record["observation_date_label"]
-        pulsar_dates[label] = pulsar_dates.get(label, 0) + 1
-
-    rows = []
-    for pulsar in sorted(dates_by_pulsar):
-        pulsar_dates = dates_by_pulsar[pulsar]
-        rows.append(
-            {
-                "Pulsar": pulsar,
-                "Observations": sum(pulsar_dates.values()),
-                "Latest": next(iter(pulsar_dates)),
-                "Observation Dates": ", ".join(
-                    label if count == 1 else f"{label} (x{count})" for label, count in pulsar_dates.items()
-                ),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
+# A fragment: picking a pulsar, month or day redraws only the archive, not the whole page.
+@st.fragment
 def render_archive_tab() -> None:
-    st.markdown(
-        """
-        <div class="dart-highlight">
-            <div class="dart-highlight-title">Observation Archive</div>
-            <div class="dart-highlight-meta">
-                Search, filter by pulsar and observation date, preview, and download FITS observations.
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
+    st.subheader("Observation archive")
     archive_records = build_archive_records(FITS_PLOTS_DIR)
     if not archive_records:
         st.info("No FITS archives are available yet.")
         return
 
-    search_query = st.text_input(
-        "Search observations",
-        placeholder="Search by pulsar, file name, or observation date",
-        key="archive_search_query",
-    ).strip()
+    pulsar_counts: dict[str, int] = {}
+    for record in archive_records:
+        pulsar_counts[record["pulsar"]] = pulsar_counts.get(record["pulsar"], 0) + 1
+    pulsar_counts = {ALL_PULSARS: len(archive_records), **dict(sorted(pulsar_counts.items()))}
 
-    available_pulsars = sorted({record["pulsar"] for record in archive_records})
-    pulsar_col, date_col = st.columns([1, 1])
+    st.metric("Total observations", len(archive_records))
 
+    pulsar_col, month_col = st.columns(2)
     with pulsar_col:
-        selected_pulsars = st.multiselect(
-            "Filter pulsars",
-            options=available_pulsars,
-            default=[],
-            key="archive_pulsar_filter",
+        pulsar = st.selectbox(
+            "Pulsar",
+            options=list(pulsar_counts),
+            index=None,
+            placeholder="Choose a pulsar",
+            format_func=lambda name: f"{name}  ·  {pulsar_counts[name]} obs",
+            key="archive_pulsar",
         )
+    if pulsar is None:
+        st.caption("Choose a pulsar to see the days it was observed.")
+        return
 
-    # Only offer the dates that exist for the chosen pulsars, newest first, with counts.
-    date_counts: dict[str, int] = {}
-    for record in archive_records:
-        if selected_pulsars and record["pulsar"] not in selected_pulsars:
-            continue
-        label = record["observation_date_label"]
-        date_counts[label] = date_counts.get(label, 0) + 1
-    with date_col:
-        selected_dates = st.multiselect(
-            f"Observation dates ({len(date_counts)} available)",
-            options=list(date_counts),
-            default=[],
-            format_func=lambda label: f"{label}  ·  {date_counts[label]} obs",
-            placeholder="All dates",
-            key="archive_date_filter",
+    records = [record for record in archive_records if pulsar in (ALL_PULSARS, record["pulsar"])]
+
+    # Months that have observations, newest first; files without a readable date come last.
+    def month_of(record: dict) -> tuple[int, int] | None:
+        observation_date = record["observation_date"]
+        return (observation_date.year, observation_date.month) if observation_date else None
+
+    month_counts: dict[tuple[int, int] | None, int] = {}
+    for record in records:
+        month_counts[month_of(record)] = month_counts.get(month_of(record), 0) + 1
+    months = sorted((month for month in month_counts if month), reverse=True) + ([None] if None in month_counts else [])
+    with month_col:
+        month = st.selectbox(
+            f"Month ({len(months)} with observations)",
+            options=months,
+            format_func=lambda value: (
+                f"{calendar.month_name[value[1]]} {value[0]}" if value else UNKNOWN_DATE_LABEL + " date"
+            )
+            + f"  ·  {month_counts[value]} obs",
+            key=build_widget_key("archive_month", pulsar),
         )
+    month_records = [record for record in records if month_of(record) == month]
 
-    preview_filter_col, fits_filter_col, sort_col = st.columns([1, 1, 1.4])
-    with preview_filter_col:
-        preview_only = st.checkbox(
-            "Preview only",
-            value=False,
-            help="Only show observations with a preview PNG.",
-            key="archive_preview_only",
-        )
-    with fits_filter_col:
-        fits_only = st.checkbox(
-            "FITS only",
-            value=False,
-            help="Only show observations with a downloadable FITS file.",
-            key="archive_fits_only",
-        )
-    with sort_col:
-        sort_mode = st.selectbox(
-            "Sort by",
-            options=["Newest", "Oldest", "Pulsar A-Z", "Largest FITS"],
-            key="archive_sort_mode",
-        )
-
-    with st.expander(f"Available observation dates · {len(available_pulsars)} pulsars", expanded=False):
-        st.dataframe(build_date_overview(archive_records), width='stretch', hide_index=True)
-
-    normalized_query = search_query.lower()
-    filtered_records = []
-    for record in archive_records:
-        searchable_text = " ".join(
-            [
-                record["pulsar"],
-                record["file_name"],
-                record["observation_date_label"],
-                record["created_at"],
-            ]
-        ).lower()
-
-        if normalized_query and normalized_query not in searchable_text:
-            continue
-        if selected_pulsars and record["pulsar"] not in selected_pulsars:
-            continue
-        if selected_dates and record["observation_date_label"] not in selected_dates:
-            continue
-        if preview_only and record["preview_path"] is None:
-            continue
-        if fits_only and record["fits_path"] is None:
-            continue
-
-        filtered_records.append(record)
-
-    if sort_mode == "Oldest":
-        filtered_records.sort(key=archive_sort_key)
-    elif sort_mode == "Pulsar A-Z":
-        filtered_records.sort(key=archive_sort_key, reverse=True)
-        filtered_records.sort(key=lambda record: record["pulsar"])
-    elif sort_mode == "Largest FITS":
-        filtered_records.sort(key=lambda record: record["file_size_bytes"], reverse=True)
+    if month is None:
+        st.caption("The observation date could not be read from these file names.")
+        day_records = month_records
+        detail_col = st.container()
     else:
-        filtered_records.sort(key=archive_sort_key, reverse=True)
+        day_counts: dict[int, int] = {}
+        for record in month_records:
+            day = record["observation_date"].day
+            day_counts[day] = day_counts.get(day, 0) + 1
+        # The chosen day is remembered per pulsar and month; otherwise start on the latest day.
+        stored = st.session_state.get("archive_selected_day")
+        selected_day = stored[2] if stored and stored[:2] == (pulsar, month) and stored[2] in day_counts else max(day_counts)
 
-    page_size = max(1, ARCHIVE_RECENT_LIMIT)
-    page_count = max(1, -(-len(filtered_records) // page_size))
+        calendar_col, detail_col = st.columns([1.1, 1])
+        with calendar_col:
+            clicked_day = render_archive_calendar(month[0], month[1], day_counts, selected_day)
+            st.caption("Days with observations can be clicked; the highlighted day is shown on the right.")
+        if clicked_day is not None and clicked_day != selected_day:
+            st.session_state.archive_selected_day = (pulsar, month, clicked_day)
+            st.rerun(scope="fragment")
+        day_records = [record for record in month_records if record["observation_date"].day == selected_day]
 
-    total_col, matched_col, pages_col = st.columns(3)
-    total_col.metric("Total observations", len(archive_records))
-    matched_col.metric("Matches", len(filtered_records))
-    pages_col.metric("Pages", page_count)
-
-    if not filtered_records:
-        st.warning("No archive entries matched the current search and filters.")
-        return
-
-    render_download_picker(filtered_records)
-
-    archive_summary = pd.DataFrame(
-        [
-            {
-                "Pulsar": record["pulsar"],
-                "Observation Date": record["observation_date_label"],
-                "File": record["file_name"],
-                "Added (IST)": record["created_at"],
-                "FITS Size": record["file_size"],
-                "Preview": "Yes" if record["preview_path"] else "No",
-            }
-            for record in filtered_records
-        ]
-    )
-    st.caption(f"All {len(filtered_records)} matching observations:")
-    st.dataframe(archive_summary, width='stretch', hide_index=True, height=min(420, 38 + 35 * len(filtered_records)))
-
-    page = 1
-    if page_count > 1:
-        page = st.selectbox(
-            "Preview page",
-            options=list(range(1, page_count + 1)),
-            format_func=lambda number: (
-                f"Page {number} of {page_count} · observations "
-                f"{(number - 1) * page_size + 1}–{min(number * page_size, len(filtered_records))}"
-            ),
-            key="archive_preview_page",
-        )
-    page_records = filtered_records[(page - 1) * page_size : page * page_size]
-
-    featured_record = page_records[0]
-    with st.container(border=True):
-        feature_meta_col, feature_preview_col = st.columns([1.8, 1.2])
-        with feature_meta_col:
-            st.subheader(f"Featured: {featured_record['pulsar']}")
-            st.write(f"Observation Date: {featured_record['observation_date_label']}")
-            render_archive_card_meta(featured_record)
-        with feature_preview_col:
-            if featured_record["preview_path"]:
-                st.image(
-                    featured_record["preview_path"],
-                    caption=f"{featured_record['pulsar']} preview",
-                    width='stretch',
-                )
-            else:
-                st.info("Preview image not available.")
-
-    remaining_records = page_records[1:]
-    if not remaining_records:
-        return
-
-    card_columns = st.columns(2)
-    for index, record in enumerate(remaining_records):
-        with card_columns[index % 2]:
-            with st.container(border=True):
-                st.subheader(record["pulsar"])
-                st.caption(f"Observed on {record['observation_date_label']}")
-                render_archive_card_meta(record)
-                if record["preview_path"]:
-                    st.image(
-                        record["preview_path"],
-                        caption=f"{record['pulsar']} preview",
-                        width='stretch',
-                    )
-                else:
-                    st.info("Preview image not available.")
-
-
-def render_diagnostic_tab() -> None:
-    render_live_diagnostic_plots()
+    with detail_col:
+        record = day_records[0]
+        if len(day_records) > 1:
+            records_by_name = {entry["file_name"]: entry for entry in day_records}
+            chosen_name = st.selectbox(
+                f"Observation ({len(day_records)} on this day)" if month else f"Observation ({len(day_records)})",
+                options=list(records_by_name),
+                format_func=lambda name: f"{records_by_name[name]['pulsar']}  ·  {name}",
+                key="archive_day_observation",
+            )
+            record = records_by_name[chosen_name]
+        render_archive_detail(record)
 
 
 TRANSIENT_HDF5_DIR = Path(PROJECT_ROOT) / "transient_hdf5"
@@ -1272,6 +1302,10 @@ LIVE_HDF5_DIR = TRANSIENT_HDF5_DIR / "temp_data" / "transient_hdf5_data"
 PHASE_CALIBRATION_FILE = "rf_path_phase.dat"
 DIAGNOSTIC_FILE_CHOICES = 30
 LATEST_FILE_CHOICE = "Latest file (live)"
+# Drawn only when picked under "More plots"; the last-hour plot reads an hour of files.
+EXTRA_PLOT_CROSS = "Cross power"
+EXTRA_PLOT_FILE = "Time series of this file"
+EXTRA_PLOT_HOUR = "Last hour"
 
 
 def get_phase_calibration_path(configured_path: str) -> Path | None:
@@ -1305,10 +1339,10 @@ def get_newest_readable_file(files: list[Path]) -> Path | None:
     return None
 
 
-@st.cache_data(show_spinner=False, max_entries=32)
-def spectrum_chart(file_path: str, modified_ts: float, index: int, band: diagnostics.Band) -> dict:
+@st.cache_data(show_spinner=False, max_entries=96)
+def spectrum_panel(kind: str, file_path: str, modified_ts: float, index: int, band: diagnostics.Band) -> dict:
     arrays = load_spectra(file_path, modified_ts)
-    return diagnostics.spectrum_figure(arrays, index, band, f"{file_path}:{index}")
+    return diagnostics.SPECTRUM_PANELS[kind](arrays, index, band, f"{file_path}:{index}")
 
 
 @st.cache_data(show_spinner=False, max_entries=8)
@@ -1351,172 +1385,131 @@ def last_hour_chart(
     return chart, note
 
 
-def inject_diagnostic_styles() -> None:
-    """Navy surface for this tab, matching the sidebar cards, so charts and labels stay readable."""
-    st.markdown(
-        f"""
-        <style>
-        /* The app paints every tab block pink; clear that around this tab only. */
-        .stTabs div[data-testid="stVerticalBlock"]:has(.st-key-dart_diagnostics) {{
-            background-color: transparent !important;
-        }}
-        .stTabs .st-key-dart_diagnostics {{
-            background-color: {diagnostics.SURFACE} !important;
-            border: 1px solid rgba(145, 196, 255, 0.22);
-            border-radius: 18px;
-            padding: 1.25rem 1.25rem 1rem;
-        }}
-        .stTabs .st-key-dart_diagnostics div[data-testid="stVerticalBlock"] {{
-            background-color: transparent !important;
-            color: {diagnostics.TEXT_PRIMARY} !important;
-        }}
-        .st-key-dart_diagnostics h3,
-        .st-key-dart_diagnostics [data-testid="stWidgetLabel"] p,
-        .st-key-dart_diagnostics [data-testid="stMarkdownContainer"] p,
-        .st-key-dart_diagnostics [data-testid="stTickBarMin"],
-        .st-key-dart_diagnostics [data-testid="stTickBarMax"],
-        .st-key-dart_diagnostics button[aria-selected="false"] p {{
-            color: {diagnostics.TEXT_PRIMARY} !important;
-        }}
-        .st-key-dart_diagnostics [data-testid="stCaptionContainer"] p {{
-            color: {diagnostics.TEXT_SECONDARY} !important;
-            font-variant-numeric: tabular-nums;
-        }}
-        .st-key-dart_diagnostics code {{
-            background: rgba(145, 196, 255, 0.14);
-            color: {diagnostics.TEXT_PRIMARY};
-            overflow-wrap: anywhere;
-        }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
 @st.fragment(run_every=get_fragment_refresh_seconds())
 def render_live_diagnostic_plots() -> None:
     """HDF5 plots drawn directly in the page; no PNG files or second Streamlit application."""
     if h5py is None or diagnostics is None:
-        st.error("Tab 3 needs the `h5py` and `plotly` packages. Install them in this environment and restart DART.")
+        st.error("The diagnostic plots need the `h5py` and `plotly` packages. Install them in this environment and restart DART.")
         return
 
-    inject_diagnostic_styles()
-    with st.container(key="dart_diagnostics"):
-        files, skipped_empty = diagnostics.list_candidate_files(LIVE_HDF5_DIR)
-        newest = get_newest_readable_file(files)
-        if newest is None:
-            st.info(f"Waiting for readable HDF5 files in `{LIVE_HDF5_DIR}`")
-            return
+    files, skipped_empty = diagnostics.list_candidate_files(LIVE_HDF5_DIR)
+    newest = get_newest_readable_file(files)
+    if newest is None:
+        st.info(f"Waiting for readable HDF5 files in `{LIVE_HDF5_DIR}`")
+        return
 
-        settings = get_runtime_settings()["diagnostics"]
-        band = diagnostics.Band(
-            settings["center_frequency_mhz"], settings["bandwidth_mhz"], settings["channel0_is_high"]
-        )
+    settings = get_runtime_settings()["diagnostics"]
+    band = diagnostics.Band(
+        settings["center_frequency_mhz"], settings["bandwidth_mhz"], settings["channel0_is_high"]
+    )
 
-        st.subheader("Live HDF5 diagnostics")
-        recent_files = [path.name for path in reversed(files[-DIAGNOSTIC_FILE_CHOICES:])]
+    file_col, spectrum_col = st.columns(2)
+    recent_files = [path.name for path in reversed(files[-DIAGNOSTIC_FILE_CHOICES:])]
+    with file_col:
         choice = st.selectbox(
             "HDF5 file",
             options=[LATEST_FILE_CHOICE] + recent_files,
             key="diagnostic_file_choice",
         )
-        selected = newest if choice == LATEST_FILE_CHOICE else LIVE_HDF5_DIR / choice
-        try:
-            selected_ts = selected.stat().st_mtime
-            arrays = load_spectra(str(selected), selected_ts)
-        except diagnostics.UNREADABLE_FILE_ERRORS as exc:
-            st.warning(f"Could not read `{selected.name}`: {exc}. Choose another file.")
-            return
+    selected = newest if choice == LATEST_FILE_CHOICE else LIVE_HDF5_DIR / choice
+    try:
+        selected_ts = selected.stat().st_mtime
+        arrays = load_spectra(str(selected), selected_ts)
+    except diagnostics.UNREADABLE_FILE_ERRORS as exc:
+        st.warning(f"Could not read `{selected.name}`: {exc}. Choose another file.")
+        return
 
-        skipped_note = f" · {skipped_empty} empty files ignored" if skipped_empty else ""
-        st.caption(f"`{selected.name}` · {len(files)} files available{skipped_note}")
+    spectrum_count = arrays["corr_spec_avg"].shape[0]
+    shown = spectrum_count
+    if spectrum_count > 1:
+        with spectrum_col:
+            shown = st.slider(
+                "Spectrum in this file",
+                min_value=1,
+                max_value=spectrum_count,
+                value=shown,
+                key=f"diagnostic_spectrum_{selected.name}",
+            )
+    spectrum_time = format_ist_timestamp(float(arrays["timestamp"][shown - 1]))
+    skipped_note = f" · {skipped_empty} empty files ignored" if skipped_empty else ""
+    st.caption(
+        f"`{selected.name}` · spectrum {shown} of {spectrum_count} at {spectrum_time} · "
+        f"{len(files)} files available{skipped_note}"
+    )
 
-        chart_options = {"displaylogo": False, "scrollZoom": False}
-        spectrum_tab, file_tab, spectrogram_tab, hour_tab = st.tabs(
-            ["Pearson / phase", "This file", "Spectrogram", "Last hour"]
+    chart_options = {"displaylogo": False, "scrollZoom": False}
+    selected_path = str(selected)
+
+    def draw_spectrum_panel(kind: str) -> None:
+        st.plotly_chart(
+            spectrum_panel(kind, selected_path, selected_ts, shown - 1, band),
+            width="stretch", config=chart_options, key=f"diagnostic_{kind}_chart",
         )
-        with spectrum_tab:
-            spectrum_count = arrays["corr_spec_avg"].shape[0]
-            shown = spectrum_count
-            if spectrum_count > 1:
-                shown = st.slider(
-                    "Spectrum in this file",
-                    min_value=1,
-                    max_value=spectrum_count,
-                    value=shown,
-                    key=f"diagnostic_spectrum_{selected.name}",
-                )
-            spectrum_time = format_ist_timestamp(float(arrays["timestamp"][shown - 1]))
-            st.caption(f"Spectrum {shown} of {spectrum_count} · {spectrum_time}")
-            st.plotly_chart(
-                spectrum_chart(str(selected), selected_ts, shown - 1, band),
-                width="stretch", config=chart_options, key="diagnostic_spectrum_chart",
+
+    # Four panels on one screen: three for the chosen spectrum, one for the whole file.
+    left_col, right_col = st.columns(2)
+    with left_col:
+        draw_spectrum_panel("autocorr")
+        draw_spectrum_panel("phase")
+    with right_col:
+        draw_spectrum_panel("pearson")
+        st.plotly_chart(
+            spectrogram_chart(selected_path, selected_ts, band),
+            width="stretch", config=chart_options, key="diagnostic_spectrogram_chart",
+        )
+
+    extra_plot = st.segmented_control(
+        "More plots",
+        options=[EXTRA_PLOT_CROSS, EXTRA_PLOT_FILE, EXTRA_PLOT_HOUR],
+        default=None,
+        help="Pick one to draw it below; click it again to hide it.",
+        key="diagnostic_extra_plot",
+    )
+    if extra_plot == EXTRA_PLOT_CROSS:
+        draw_spectrum_panel("cross")
+    elif extra_plot == EXTRA_PLOT_FILE:
+        st.caption("Averaged over all channels. Drag across a panel to zoom; double-click to reset.")
+        st.plotly_chart(
+            file_chart(selected_path, selected_ts, band),
+            width="stretch", config=chart_options, key="diagnostic_file_chart",
+        )
+    elif extra_plot == EXTRA_PLOT_HOUR:
+        calibration_path = get_phase_calibration_path(settings["phase_calibration_file"])
+        channel_range = (settings["hour_channel_start"], settings["hour_channel_stop"])
+        with st.spinner("Collecting the last hour of files..."):
+            chart, note = last_hour_chart(
+                tuple(str(path) for path in files),
+                float(arrays["timestamp"][-1]),
+                band,
+                channel_range,
+                str(calibration_path) if calibration_path else None,
             )
-        with file_tab:
-            st.caption("Averaged over all channels. Drag across a panel to zoom; double-click to reset.")
-            st.plotly_chart(
-                file_chart(str(selected), selected_ts, band),
-                width="stretch", config=chart_options, key="diagnostic_file_chart",
-            )
-        with spectrogram_tab:
-            st.plotly_chart(
-                spectrogram_chart(str(selected), selected_ts, band),
-                width="stretch", config=chart_options, key="diagnostic_spectrogram_chart",
-            )
-        with hour_tab:
-            calibration_path = get_phase_calibration_path(settings["phase_calibration_file"])
-            channel_range = (settings["hour_channel_start"], settings["hour_channel_stop"])
-            with st.spinner("Collecting the last hour of files..."):
-                chart, note = last_hour_chart(
-                    tuple(str(path) for path in files),
-                    float(arrays["timestamp"][-1]),
-                    band,
-                    channel_range,
-                    str(calibration_path) if calibration_path else None,
-                )
-            if chart is None:
-                st.info(note)
-            else:
-                st.caption(f"Channels {channel_range[0]}:{channel_range[1]} · hour ending at this file · {note}")
-                st.plotly_chart(chart, width="stretch", config=chart_options, key="diagnostic_hour_chart")
+        if chart is None:
+            st.info(note)
+        else:
+            st.caption(f"Channels {channel_range[0]}:{channel_range[1]} · hour ending at this file · {note}")
+            st.plotly_chart(chart, width="stretch", config=chart_options, key="diagnostic_hour_chart")
 
 
 def main() -> None:
-    
-    tab1, tab2, tab3 = st.tabs(["LOG UPDATES 🫶🏻", "Pulsar Data Archive 🌀", "DIAGNOSTIC PLOTS 🧚‍♀️"])
+    render_top_bar()
 
-    with tab1:
+    # The plots tab is offered only where [ui].enable_diagnostics is on.
+    tab_names = ["Log updates", "Pulsar data archive"]
+    if get_runtime_settings()["ui"]["enable_diagnostics"]:
+        tab_names.append("Diagnostic plots")
+    tabs = dict(zip(tab_names, st.tabs(tab_names)))
+
+    with tabs["Log updates"]:
         render_log_updates_tab()
         render_past_logs()
 
-    with tab2:
-        st.markdown("""
-                    <style>
-
-                    /* Apply to all tab blocks */
-                    .stTabs div[data-testid="stVerticalBlock"] {
-                        background-color: #f8e8ea;
-                        background-color: #f2e3e5;
-                        background-color: #eec9cf;
-                        color: black;
-                    }
-
-                    /* Only Tab 2 */
-                    .stTabs div[role="tabpanel"]:nth-of-type(2) div[data-testid="stVerticalBlock"] {
-                        background-color: #f5f5f5 !important;
-                        color: black !important;
-                    }
-
-                    </style>
-                    """, unsafe_allow_html=True)
-            
+    with tabs["Pulsar data archive"]:
         render_archive_tab()
 
-    with tab3:
-        if get_runtime_settings()["ui"]["enable_diagnostics"]:
-            render_diagnostic_tab()
-        else:
-            st.write("Under Construction")
+    if "Diagnostic plots" in tabs:
+        with tabs["Diagnostic plots"]:
+            render_live_diagnostic_plots()
 
 
 if __name__ == "__main__":

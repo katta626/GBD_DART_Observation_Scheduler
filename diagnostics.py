@@ -1,7 +1,8 @@
 """Diagnostic plots for the DIAGNOSTIC PLOTS tab, read directly from the PDR HDF5 files.
 
-Draws the four plots of the original scripts in live_PDR_plot.zip (pearson_CC,
-cc_tseries_phase, spectrogram, one_hr_plot) as interactive Plotly charts.
+Draws the plots of the original scripts in live_PDR_plot.zip (pearson_CC, cc_tseries_phase,
+spectrogram, one_hr_plot) as interactive Plotly charts. The page shows four small panels
+(auto-correlations, Pearson, phase, spectrogram); the rest are drawn only when asked for.
 
 The auto- and cross-correlations are already powers: p_sum_avg = acorr1 + acorr2 + 2*Re(corr)
 to within 0.1% in the real data. So power in dB is 10*log10(|x|), not the original
@@ -20,6 +21,8 @@ import pandas as pd
 MIN_VALID_FILE_BYTES = 1024
 # More columns than a screen has pixels only slows the browser; one hour is ~7000 spectra.
 MAX_SPECTROGRAM_COLUMNS = 720
+# Height of one small panel: two rows of them fit on one screen below the controls.
+PANEL_HEIGHT = 275
 
 SPECTRUM_DATASETS = ("timestamp", "corr_spec_avg", "acorr_spec_avg1", "acorr_spec_avg2")
 WINDOW_DATASETS = ("timestamp", "corr_spec_avg", "p_sum_avg")
@@ -254,38 +257,85 @@ def _finish(figure, row: int, x_title: str, revision: str, time_format: str | No
 
 
 # ------------------------------------------------------------------------------
-# The four plots
+# Small panels: one spectrum against channel number and frequency (pearson_CC)
 # ------------------------------------------------------------------------------
-def spectrum_figure(arrays: dict[str, np.ndarray], index: int, band: Band, revision: str) -> dict:
-    """pearson_CC: Pearson_Corr_coeff.png. One spectrum against channel number and frequency."""
-    corr = arrays["corr_spec_avg"][index]
-    acorr1 = arrays["acorr_spec_avg1"][index]
-    acorr2 = arrays["acorr_spec_avg2"][index]
-    channels = np.arange(corr.size)
+def _panel(title: str):
+    figure = _new_figure(1, PANEL_HEIGHT)
+    figure.update_layout(
+        margin={"l": 64, "r": 18, "t": 42, "b": 62},
+        title={"text": title, "x": 0.01, "xanchor": "left", "y": 0.97, "yanchor": "top",
+               "font": {"color": TEXT_PRIMARY, "size": 14}},
+    )
+    return figure
 
-    figure = _new_figure(5, 980)
-    figure.add_trace(_line(channels, power_db(acorr1), "Auto-corr. 1"), row=1, col=1)
-    _axis_title(figure, 1, "Auto-corr. 1 (dB)")
-    figure.add_trace(_line(channels, power_db(acorr2), "Auto-corr. 2"), row=2, col=1)
-    _axis_title(figure, 2, "Auto-corr. 2 (dB)")
-    figure.add_trace(_line(channels, power_db(corr), "Cross power"), row=3, col=1)
-    _axis_title(figure, 3, "Cross power (dB)")
-    figure.add_trace(_line(channels, pearson_magnitude(corr, acorr1, acorr2), "Pearson |\u03c1|"), row=4, col=1)
-    figure.update_yaxes(rangemode="tozero", row=4, col=1)
-    _axis_title(figure, 4, "Pearson |\u03c1|")
-    figure.add_trace(_dots(channels, phase_degrees(corr), "Phase"), row=5, col=1)
-    figure.update_yaxes(range=[-180, 180], tickvals=[-180, -90, 0, 90, 180], row=5, col=1)
-    _axis_title(figure, 5, "Phase (deg)")
-    frequencies = band.channel_frequencies(corr.size)
-    tick_channels = np.arange(0, corr.size, 25)
+
+def _finish_channel_panel(figure, y_title: str, channel_count: int, band: Band, revision: str) -> dict:
+    _axis_title(figure, 1, y_title)
+    frequencies = band.channel_frequencies(channel_count)
+    tick_channels = np.arange(0, channel_count, 50)
     figure.update_xaxes(
         tickvals=tick_channels,
         ticktext=[f"{channel}<br>{frequencies[channel]:.1f}" for channel in tick_channels],
-        range=[-1, corr.size],
+        range=[-1, channel_count],
     )
-    return _finish(figure, 5, "Channel number (top) and frequency in MHz (bottom)", revision)
+    return _finish(figure, 1, "Channel (top) · MHz (bottom)", revision)
 
 
+def autocorr_figure(arrays: dict[str, np.ndarray], index: int, band: Band, revision: str) -> dict:
+    acorr1 = arrays["acorr_spec_avg1"][index]
+    acorr2 = arrays["acorr_spec_avg2"][index]
+    channels = np.arange(acorr1.size)
+    figure = _panel("Auto-correlations")
+    figure.add_trace(_line(channels, power_db(acorr1), "Antenna 1", legend=True))
+    figure.add_trace(_line(channels, power_db(acorr2), "Antenna 2", SERIES_2, legend=True))
+    figure.update_layout(showlegend=True)
+    return _finish_channel_panel(figure, "Power (dB)", acorr1.size, band, revision)
+
+
+def pearson_figure(arrays: dict[str, np.ndarray], index: int, band: Band, revision: str) -> dict:
+    corr = arrays["corr_spec_avg"][index]
+    rho = pearson_magnitude(corr, arrays["acorr_spec_avg1"][index], arrays["acorr_spec_avg2"][index])
+    figure = _panel("Pearson correlation |\u03c1|")
+    figure.add_trace(_line(np.arange(corr.size), rho, "Pearson |\u03c1|"))
+    figure.update_yaxes(rangemode="tozero")
+    return _finish_channel_panel(figure, "|\u03c1|", corr.size, band, revision)
+
+
+def phase_figure(arrays: dict[str, np.ndarray], index: int, band: Band, revision: str) -> dict:
+    corr = arrays["corr_spec_avg"][index]
+    figure = _panel("Cross-correlation phase")
+    figure.add_trace(_dots(np.arange(corr.size), phase_degrees(corr), "Phase", size=4))
+    figure.update_yaxes(range=[-180, 180], tickvals=[-180, -90, 0, 90, 180])
+    return _finish_channel_panel(figure, "Phase (deg)", corr.size, band, revision)
+
+
+def cross_power_figure(arrays: dict[str, np.ndarray], index: int, band: Band, revision: str) -> dict:
+    corr = arrays["corr_spec_avg"][index]
+    figure = _panel("Cross power")
+    figure.add_trace(_line(np.arange(corr.size), power_db(corr), "Cross power"))
+    return _finish_channel_panel(figure, "Power (dB)", corr.size, band, revision)
+
+
+SPECTRUM_PANELS = {
+    "autocorr": autocorr_figure,
+    "pearson": pearson_figure,
+    "phase": phase_figure,
+    "cross": cross_power_figure,
+}
+
+
+def spectrogram_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, revision: str) -> dict:
+    """spectrogram: spectrogram.png. Time against frequency for one file, as a small panel."""
+    corr = arrays["corr_spec_avg"]
+    figure = _panel("Spectrogram of this file")
+    figure.update_layout(margin={"r": 28, "b": 50})
+    _add_spectrogram(figure, 1, arrays["timestamp"], corr, band.channel_frequencies(corr.shape[1]), timezone)
+    return _finish(figure, 1, "Time (IST)", revision, "%H:%M:%S", to_local_times(arrays["timestamp"], timezone))
+
+
+# ------------------------------------------------------------------------------
+# Larger plots, drawn only when asked for
+# ------------------------------------------------------------------------------
 def file_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, revision: str) -> dict:
     """cc_tseries_phase: cc_tseries_phase.png. One file, averaged over every channel."""
     timestamps = arrays["timestamp"]
@@ -293,7 +343,7 @@ def file_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, r
     average = np.mean(corr, axis=1)
     times = to_local_times(timestamps, timezone)
 
-    figure = _new_figure(3, 780, row_heights=[1, 1.25, 1])
+    figure = _new_figure(3, 600, row_heights=[1, 1.25, 1])
     figure.add_trace(_line(times, average.real, "Real", legend=True), row=1, col=1)
     figure.add_trace(_line(times, average.imag, "Imaginary", SERIES_2, legend=True), row=1, col=1)
     figure.update_layout(showlegend=True)
@@ -303,14 +353,6 @@ def file_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, r
     figure.add_hline(y=0, line={"color": TEXT_SECONDARY, "width": 1, "dash": "dash"}, row=3, col=1)
     _axis_title(figure, 3, "Phase (deg)")
     return _finish(figure, 3, "Time (IST)", revision, "%H:%M:%S", times)
-
-
-def spectrogram_figure(arrays: dict[str, np.ndarray], band: Band, timezone: ZoneInfo, revision: str) -> dict:
-    """spectrogram: spectrogram.png. Time against frequency for one file."""
-    corr = arrays["corr_spec_avg"]
-    figure = _new_figure(1, 560)
-    _add_spectrogram(figure, 1, arrays["timestamp"], corr, band.channel_frequencies(corr.shape[1]), timezone)
-    return _finish(figure, 1, "Time (IST)", revision, "%H:%M:%S", to_local_times(arrays["timestamp"], timezone))
 
 
 def window_figure(
@@ -330,7 +372,7 @@ def window_figure(
     average = np.mean(corr_slice, axis=1)
     times = to_local_times(timestamps, timezone)
 
-    figure = _new_figure(5, 1080, row_heights=[1, 1, 1, 1.35, 1])
+    figure = _new_figure(5, 860, row_heights=[1, 1, 1, 1.35, 1])
     figure.add_trace(
         _line(times, np.mean(pa_power[:, start_channel:stop_channel], axis=1), "PA power", gl=True, width=1.2),
         row=1,
