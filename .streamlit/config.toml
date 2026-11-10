@@ -1,0 +1,8 @@
+# Look of the DART page. Streamlit reads this when `streamlit run app1.py` is started
+# from this folder. Only colours are set here; server options stay at their defaults.
+[theme]
+base = "dark"
+primaryColor = "#2f74d0"
+backgroundColor = "#0c1c34"
+secondaryBackgroundColor = "#14294a"
+textColor = "#f0efec"
