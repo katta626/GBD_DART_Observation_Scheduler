@@ -416,11 +416,14 @@ def inject_custom_styles() -> None:
             font-weight: 600;
             color: #1f5fbf;
         }
+        /* LST and MJD side by side; they wrap onto two lines only if the sidebar is too narrow. */
+        .dart-info-row { display: flex; flex-wrap: wrap; column-gap: 1.1rem; }
         .dart-info-meta {
             font-size: 0.88rem;
             color: #3b4657;
             line-height: 1.45;
         }
+        .dart-info-meta span { color: #1f5fbf; font-weight: 600; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -536,7 +539,7 @@ def render_time_panel() -> None:
         <div class="dart-info-card">
             <div class="dart-info-kicker">Disk space</div>
             <div class="dart-info-title"><span>Free</span>{html.escape(free)}</div>
-            <div class="dart-info-meta">Used {html.escape(used)} · Total {html.escape(total)}</div>
+            <div class="dart-info-meta"><span>Used</span> {html.escape(used)} · <span>Total</span> {html.escape(total)}</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -547,8 +550,10 @@ def render_time_panel() -> None:
         <div class="dart-info-card">
             <div class="dart-info-kicker">Clock · {html.escape(ist_now.strftime("%d-%m-%Y"))}</div>
             <div class="dart-info-title"><span>IST</span>{html.escape(ist_now.strftime("%H:%M:%S"))}</div>
-            <div class="dart-info-title"><span>LST</span>{html.escape(current_lst_str)}</div>
-            <div class="dart-info-title"><span>MJD</span>{get_current_mjd(ist_now):.5f}</div>
+            <div class="dart-info-row">
+                <div class="dart-info-title"><span>LST</span>{html.escape(current_lst_str)}</div>
+                <div class="dart-info-title"><span>MJD</span>{get_current_mjd(ist_now):.5f}</div>
+            </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -1217,6 +1222,8 @@ def render_archive_tab() -> None:
         pulsar_counts[record["pulsar"]] = pulsar_counts.get(record["pulsar"], 0) + 1
     pulsar_counts = {ALL_PULSARS: len(archive_records), **dict(sorted(pulsar_counts.items()))}
 
+    st.metric("Total observations", len(archive_records))
+
     pulsar_col, month_col = st.columns(2)
     with pulsar_col:
         pulsar = st.selectbox(
@@ -1228,10 +1235,7 @@ def render_archive_tab() -> None:
             key="archive_pulsar",
         )
     if pulsar is None:
-        st.caption(
-            f"{len(archive_records)} observations of {len(pulsar_counts) - 1} pulsars. "
-            "Choose a pulsar to see the days it was observed."
-        )
+        st.caption("Choose a pulsar to see the days it was observed.")
         return
 
     records = [record for record in archive_records if pulsar in (ALL_PULSARS, record["pulsar"])]
