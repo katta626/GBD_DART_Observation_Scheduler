@@ -3,9 +3,3 @@
 [theme]
 base = "light"
 primaryColor = "#2f74d0"
-
-# The scheduler sidebar keeps its dark navy look.
-[theme.sidebar]
-backgroundColor = "#14294a"
-secondaryBackgroundColor = "#0c1c34"
-textColor = "#f0efec"

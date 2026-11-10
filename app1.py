@@ -373,7 +373,7 @@ def inject_custom_styles() -> None:
             white-space: nowrap;
         }
         .dart-chip span {
-            color: #000000;
+            color: #1f5fbf;
             font-size: 0.66rem;
             font-weight: 600;
             letter-spacing: 0.07em;
@@ -388,19 +388,20 @@ def inject_custom_styles() -> None:
         .st-key-dart_calendar p { text-align: center; margin: 0; }
 
         .dart-info-card {
-            background: rgba(255, 255, 255, 0.045);
-            border: 1px solid rgba(145, 196, 255, 0.2);
+            background: #ffffff;
+            border: 1px solid rgba(12, 28, 52, 0.14);
             border-radius: 12px;
             padding: 0.7rem 0.9rem;
             margin: 0.25rem 0 0.6rem 0;
-            color: #f0efec;
+            color: #000000;
             font-variant-numeric: tabular-nums;
         }
         .dart-info-kicker {
             font-size: 0.7rem;
+            font-weight: 600;
             letter-spacing: 0.08em;
             text-transform: uppercase;
-            color: #8bc4ff;
+            color: #1f5fbf;
             margin-bottom: 0.25rem;
         }
         .dart-info-title {
@@ -412,12 +413,12 @@ def inject_custom_styles() -> None:
             display: inline-block;
             width: 2.6rem;
             font-size: 0.78rem;
-            font-weight: 500;
-            color: #c3c2b7;
+            font-weight: 600;
+            color: #1f5fbf;
         }
         .dart-info-meta {
             font-size: 0.88rem;
-            color: #c3c2b7;
+            color: #3b4657;
             line-height: 1.45;
         }
         </style>
