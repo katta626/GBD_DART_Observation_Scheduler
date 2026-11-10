@@ -327,7 +327,7 @@ def inject_custom_styles() -> None:
     st.markdown(
         """
         <style>
-        .block-container { padding-top: 4.2rem; }
+        .block-container { padding-top: 3.6rem; }
         [data-testid="stCaptionContainer"] { font-variant-numeric: tabular-nums; }
 
         /* The wallpaper stays behind the page; the tabs sit on a panel so their content is readable. */
@@ -341,29 +341,39 @@ def inject_custom_styles() -> None:
         .stPlotlyChart { border-radius: 12px; overflow: hidden; }
 
         /* Clock, disk space and current observation in the empty middle of the page header. */
+        /* Absolute: Streamlit's non-scrolling wrapper around the header and the main area is the
+           nearest positioned ancestor, so the strip stays in the header, centred over the main area
+           whatever the sidebar width. */
         .st-key-dart_topbar {
-            position: fixed;
+            position: absolute;
             top: 0;
-            right: 9.5rem;
-            height: 3.75rem;
+            left: 0;
+            right: 0;
             width: auto;
+            height: 3.75rem;
             z-index: 999991;
-            display: flex;
-            align-items: center;
+            pointer-events: none;
         }
-        .dart-topbar { display: flex; gap: 0.45rem; align-items: center; font-variant-numeric: tabular-nums; }
+        .dart-topbar {
+            display: flex;
+            gap: 0.45rem;
+            align-items: center;
+            justify-content: center;
+            height: 3.75rem;
+            font-variant-numeric: tabular-nums;
+        }
         .dart-chip {
-            background: rgba(12, 28, 52, 0.9);
-            border: 1px solid rgba(145, 196, 255, 0.25);
+            background: #ffffff;
+            border: 1px solid rgba(0, 0, 0, 0.28);
             border-radius: 999px;
             padding: 0.22rem 0.75rem;
-            color: #f0efec;
+            color: #000000;
             font-size: 0.82rem;
             font-weight: 600;
             white-space: nowrap;
         }
         .dart-chip span {
-            color: #8bc4ff;
+            color: #000000;
             font-size: 0.66rem;
             font-weight: 600;
             letter-spacing: 0.07em;
